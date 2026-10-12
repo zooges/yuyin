@@ -220,17 +220,13 @@ public actor ModelInstaller {
             return (try? locator.ggufFiles(in: dir)) != nil
         case .polishModel:
             return (try? locator.polishModelFile(in: dir)) != nil
-        case .streamingXASRFast, .streamingXASR, .streamingZipformer:
+        case .streamingXASRFast, .streamingXASR:
             guard let files = try? locator.streamingFiles(in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: files.tokens).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL
-        case .senseVoice, .paraformer, .fireRed:
+        case .senseVoice, .paraformer:
             guard let files = try? locator.offlineFiles(kind, in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: files.tokens).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL
-        case .qwen3ASR, .funASRNano:
-            guard (try? locator.offlineFiles(kind, in: dir)) != nil else { return false }
-            let marker = kind == .qwen3ASR ? "conv_frontend.onnx" : "llm.int8.onnx"
-            return !shallow || FileManager.default.fileExists(atPath: dir.appendingPathComponent(marker).path)
-        case .speakerEmbedding, .speakerSegmentation, .punctuation:
+        case .speakerEmbedding, .punctuation:
             guard let model = try? locator.singleModel(kind, in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: model).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL
         case .senseVoiceANE:
@@ -241,13 +237,9 @@ public actor ModelInstaller {
     private func detectKind(of folder: URL) -> ModelKind? {
         let name = folder.lastPathComponent.lowercased()
         if (try? locator.ggufFiles(in: folder)) != nil { return .qwen3ASRLarge }
-        if (try? locator.offlineFiles(.qwen3ASR, in: folder)) != nil { return .qwen3ASR }
-        if (try? locator.offlineFiles(.funASRNano, in: folder)) != nil { return .funASRNano }
         if name.contains("punct"), (try? locator.singleModel(.punctuation, in: folder)) != nil { return .punctuation }
-        if (try? locator.offlineFiles(.fireRed, in: folder)) != nil { return .fireRed }
         if (try? locator.streamingFiles(in: folder)) != nil {
-            if name.contains("x-asr") { return name.contains("160ms") ? .streamingXASRFast : .streamingXASR }
-            return .streamingZipformer
+            return name.contains("160ms") ? .streamingXASRFast : .streamingXASR
         }
         if (try? locator.offlineFiles(.senseVoice, in: folder)) != nil {
             if name.contains("paraformer") { return .paraformer }
@@ -257,11 +249,9 @@ public actor ModelInstaller {
             let count = tokens?.split(separator: "\n").count ?? 0
             return count > 15_000 ? .senseVoice : .paraformer
         }
-        if (try? locator.singleModel(.speakerSegmentation, in: folder)) != nil {
-            if name.contains("segmentation") || name.contains("pyannote") { return .speakerSegmentation }
-            if name.contains("speaker") || name.contains("eres2net") || name.contains("campplus") || name.contains("3dspeaker") {
-                return .speakerEmbedding
-            }
+        if (try? locator.singleModel(.speakerEmbedding, in: folder)) != nil,
+           name.contains("speaker") || name.contains("campplus") || name.contains("3dspeaker") {
+            return .speakerEmbedding
         }
         return nil
     }

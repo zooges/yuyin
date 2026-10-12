@@ -262,7 +262,7 @@ private struct RecognitionSettings: View {
         }
 
         SettingsGroup(title: "专业词汇",
-                      footer: "当事人、公司、人名等专有名词被写成同音或近音字时自动改回（3 个字以上才按近音）；固定的错误可写成「备诉=反诉」精确替换。用 Fun-ASR-Nano 纠错时，前 20 个还会作为热词。") {
+                      footer: "当事人、公司、人名等专有名词被写成同音或近音字时自动改回（3 个字以上才按近音）；固定的错误可写成「备诉=反诉」精确替换。Qwen3-ASR 识别时也会参考这些名词。") {
             SettingsRow(title: "法律术语校正", detail: "如「新政」→「心证」、「权力瑕疵」→「权利瑕疵」") {
                 HUDToggle(isOn: $preferences.settings.legalTerms)
             }
@@ -333,9 +333,9 @@ private struct ModelSettings: View {
     #endif
 
     private let groups: [(String, [ModelKind])] = [
-        ("实时字幕", [.streamingXASRFast, .streamingXASR, .streamingZipformer]),
+        ("实时字幕", [.streamingXASRFast, .streamingXASR]),
         ("句末纠错", (LocalEngines.supportsLlama ? [.qwen3ASRLarge] : [])
-            + [.funASRNano, .paraformer, .senseVoiceANE, .senseVoice, .fireRed, .qwen3ASR, .punctuation]),
+            + [.paraformer, .senseVoiceANE, .senseVoice, .punctuation]),
         ("多人", [.speakerEmbedding]),
         ("润色", LocalEngines.supportsLlama ? [.polishModel] : []),
     ]

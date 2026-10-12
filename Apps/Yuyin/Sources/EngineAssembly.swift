@@ -10,7 +10,6 @@ struct AppEngineProvider: EngineProvider {
 
     func makeEngines(for settings: AppSettings) async throws -> EngineSet {
         var local = local
-        local.hotwords = settings.hotwords
         local.context = settings.recognitionContext
         let labeler = settings.speakerLabeling ? local.makeSpeakerLabeler() : nil
         let translator = makeTranslator(settings)
@@ -111,8 +110,12 @@ struct EnginePlan: Equatable {
 enum EngineNames {
     static func display(_ providerID: String) -> String {
         switch providerID {
-        case "sherpa-zipformer", "sherpa-streaming-zipformer": return "Zipformer"
         case "sherpa-x-asr": return "X-ASR"
+        // Retired models, still named in older recordings.
+        case "sherpa-zipformer", "sherpa-streaming-zipformer": return "Zipformer"
+        case "sherpa-firered": return "FireRedASR"
+        case "sherpa-qwen3-asr": return "Qwen3-ASR"
+        case "sherpa-funasr-nano": return "Fun-ASR-Nano"
         case "sherpa-x-asr-160ms": return "X-ASR 低延迟"
         case "apple-speech", "apple-speech-offline", "apple-speech-corrector": return "系统识别"
         case "funasr-realtime": return "Fun-ASR 实时"
@@ -120,9 +123,6 @@ enum EngineNames {
         case "sherpa-sensevoice": return "SenseVoice"
         case "ane-sensevoice", "fluidaudio-sensevoice": return "SenseVoice·ANE"
         case "sherpa-paraformer": return "Paraformer"
-        case "sherpa-firered": return "FireRedASR"
-        case "sherpa-qwen3-asr": return "Qwen3-ASR"
-        case "sherpa-funasr-nano": return "Fun-ASR-Nano"
         case "llama-qwen3-asr-1.7b": return "Qwen3-ASR 1.7B"
         case "qwen-mt": return "千问 MT"
         case "apple-translation": return "系统翻译"

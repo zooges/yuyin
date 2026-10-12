@@ -7,8 +7,6 @@ public struct LocalEngines: Sendable {
     public enum Streaming: Equatable, Sendable {
         case xasrFast
         case xasr
-        /// Zipformer (2023), before X-ASR.
-        case sherpa
         case appleSpeech
     }
 
@@ -24,8 +22,6 @@ public struct LocalEngines: Sendable {
     public let locator: ModelLocator
     /// Injected for tests; defaults to the real device capability.
     private let onDeviceSpeech: @Sendable () -> Bool
-    /// User vocabulary for models that support it (comma-separated).
-    public var hotwords: String = ""
     /// Context for models that read it (Qwen3-ASR 1.7B).
     public var context: RecognitionContext?
 
@@ -37,12 +33,11 @@ public struct LocalEngines: Sendable {
     // MARK: - Resolution
 
     public func resolveStreaming(_ choice: StreamingEngineChoice) throws -> Streaming {
-        // X-ASR when installed: on the user's legal meeting its live text had ~40% fewer errors
-        // than Zipformer. The 160 ms model shows text sooner (0.30 s vs 0.48 s after speech);
-        // the user found live text slow, and corrections replace it within seconds anyway.
+        // On the user's legal meeting X-ASR's live text had ~40% fewer errors than the Zipformer
+        // used before. The 160 ms model shows text sooner (0.30 s vs 0.48 s after speech); the
+        // user found live text slow, and corrections replace it within seconds anyway.
         let accurate: Streaming? = locator.isInstalled(.streamingXASR) ? .xasr
-            : locator.isInstalled(.streamingXASRFast) ? .xasrFast
-            : locator.isInstalled(.streamingZipformer) ? .sherpa : nil
+            : locator.isInstalled(.streamingXASRFast) ? .xasrFast : nil
         let fast: Streaming? = locator.isInstalled(.streamingXASRFast) ? .xasrFast : accurate
         switch choice {
         case .fast:
@@ -72,9 +67,6 @@ public struct LocalEngines: Sendable {
         case .paraformer: return try require(.paraformer, .sherpa(.paraformer))
         case .senseVoiceANE: return try require(.senseVoiceANE, .senseVoiceANE)
         case .senseVoice: return try require(.senseVoice, .sherpa(.senseVoice))
-        case .fireRed: return try require(.fireRed, .sherpa(.fireRed))
-        case .funASRNano: return try require(.funASRNano, .sherpa(.funASRNano))
-        case .qwen3ASR: return try require(.qwen3ASR, .sherpa(.qwen3))
         case .appleSpeech: return .appleSpeech
         case .none: return .none
         case .auto:
@@ -88,23 +80,19 @@ public struct LocalEngines: Sendable {
 
     static var autoOrder: [(ModelKind, Corrector)] {
         #if os(macOS)
-        // Qwen3-ASR 1.7B: most accurate on the user's legal meeting and, on the GPU, fastest.
-        // Fun-ASR-Nano: best on mixed Chinese/English and English; Paraformer: fast, Chinese only.
+        // Qwen3-ASR 1.7B: most accurate on the user's legal meeting (ahead of Fun-ASR-Nano, since
+        // removed) and, on the GPU, fastest. Paraformer: fast, Chinese only.
         return [
             (.qwen3ASRLarge, .llamaQwen3),
-            (.funASRNano, .sherpa(.funASRNano)),
             (.paraformer, .sherpa(.paraformer)),
             (.senseVoiceANE, .senseVoiceANE),
             (.senseVoice, .sherpa(.senseVoice)),
-            (.fireRed, .sherpa(.fireRed)),
         ]
         #else
-        // ~1 GB LLM models are heavy on a phone.
         return [
             (.paraformer, .sherpa(.paraformer)),
             (.senseVoiceANE, .senseVoiceANE),
             (.senseVoice, .sherpa(.senseVoice)),
-            (.funASRNano, .sherpa(.funASRNano)),
         ]
         #endif
     }
@@ -119,7 +107,6 @@ public struct LocalEngines: Sendable {
         case .xasr:
             return SherpaStreamingEngine(files: try locator.streamingFiles(in: locator.directory(for: .streamingXASR)),
                                          providerID: "sherpa-x-asr")
-        case .sherpa: return SherpaStreamingEngine(files: try locator.streamingFiles())
         case .appleSpeech: return AppleSpeechStreamingEngine()
         }
     }
@@ -152,14 +139,9 @@ public struct LocalEngines: Sendable {
             return FluidSenseVoiceCorrector(directory: locator.directory(for: .senseVoiceANE))
         case .sherpa(let kind):
             let punctuation = kind.needsPunctuation ? try? locator.singleModel(.punctuation) : nil
-            // Without a language, Fun-ASR-Nano turned short Chinese exclamations into Japanese
-            // ("这波" → "ちょっと。"); with "中文" English sentences still come out in English.
-            let engine = SherpaOfflineCorrector(
-                kind: kind, files: try locator.offlineFiles(kind.modelKind),
-                hotwords: hotwords, punctuationModel: punctuation,
-                promptLanguage: kind == .funASRNano ? "中文" : ""
-            )
-            // SenseVoice answers "。" to noise; the others may invent words, so guard them.
+            let engine = SherpaOfflineCorrector(kind: kind, files: try locator.offlineFiles(kind.modelKind),
+                                                punctuationModel: punctuation)
+            // SenseVoice answers "。" to noise; Paraformer may invent words, so guard it.
             let guarded = kind == .senseVoice ? GuardedCorrector(primary: engine, gate: nil)
                 : GuardedCorrector(primary: engine, gate: makeGate())
             if kind == .paraformer, let english = makeEnglishCorrector() {
@@ -219,22 +201,18 @@ public extension LocalEngines.Streaming {
         switch self {
         case .xasrFast: return "X-ASR 低延迟"
         case .xasr: return "X-ASR"
-        case .sherpa: return "Sherpa Zipformer"
         case .appleSpeech: return "系统语音识别"
         }
     }
 }
 
 extension SherpaOfflineCorrector.Kind {
-    var needsPunctuation: Bool { self == .paraformer || self == .fireRed }
+    var needsPunctuation: Bool { self == .paraformer }
 
     var modelKind: ModelKind {
         switch self {
         case .senseVoice: return .senseVoice
         case .paraformer: return .paraformer
-        case .fireRed: return .fireRed
-        case .qwen3: return .qwen3ASR
-        case .funASRNano: return .funASRNano
         }
     }
 }
@@ -246,9 +224,6 @@ public extension LocalEngines.Corrector {
         case .senseVoiceANE: return "SenseVoice（神经网络引擎）"
         case .sherpa(.senseVoice): return "SenseVoice"
         case .sherpa(.paraformer): return "Paraformer"
-        case .sherpa(.fireRed): return "FireRedASR"
-        case .sherpa(.qwen3): return "Qwen3-ASR"
-        case .sherpa(.funASRNano): return "Fun-ASR-Nano"
         case .appleSpeech: return "系统语音识别"
         case .none: return "不纠错"
         }

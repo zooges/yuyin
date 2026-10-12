@@ -11,11 +11,11 @@ v0.2 重新设计说明（含 v0.1 审查结论）：[`docs/plans/2026-10-11-v0.
 
 | 能力 | 实现 |
 |------|------|
-| 实时字幕 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 流式 [X-ASR](https://github.com/Gilgamesh-J/X-ASR)（中英，自带标点；旧版 Zipformer 仍可用）；未装模型时用系统**本机**语音识别 |
-| 句末纠错 | **Qwen3-ASR 1.7B**（macOS 推荐，[llama.cpp](https://github.com/ggml-org/llama.cpp) 显卡加速，参考上文与专业词汇；法律会议录音实测最准、每句约 0.3 秒）/ **Fun-ASR-Nano**（中文 / 英文 / 中英混说）/ Paraformer-large + 中文标点（纯中文，英文句自动交给 SenseVoice）/ SenseVoice（Sherpa 或 [FluidAudio](https://github.com/FluidInference/FluidAudio) 神经网络引擎）/ FireRedASR / Fun-ASR-Nano / Qwen3-ASR；大模型输出有防幻觉过滤 |
+| 实时字幕 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 流式 [X-ASR](https://github.com/Gilgamesh-J/X-ASR)（中英，自带标点，低延迟 160 ms 与标准 480 ms 两档）；未装模型时用系统**本机**语音识别 |
+| 句末纠错 | **Qwen3-ASR 1.7B**（macOS 推荐，[llama.cpp](https://github.com/ggml-org/llama.cpp) 显卡加速，参考上文与专业词汇；法律会议录音实测最准、每句约 0.3 秒）/ Paraformer-large + 中文标点（纯中文，英文句自动交给 SenseVoice；iPhone / iPad 推荐）/ SenseVoice（Sherpa 或 [FluidAudio](https://github.com/FluidInference/FluidAudio) 神经网络引擎）；大模型输出有防幻觉过滤 |
 | 云端 | 阿里云百炼 Fun-ASR：实时 WebSocket + 句级同步 HTTP；混合模式失败时回退本机 |
 | 断句 | 内置 Silero VAD 判断有没有人说话（远处、小声的人也算），连续切分不丢音频；长句在短停顿处就断；多人时声纹一变就在换人处断开；逐句音量归一化 |
-| 专业词汇 | 法律术语校正（同音写错的「新政」→「心证」等，按声调和分词严格匹配）；自定义专有名词（当事人、公司）按近音改回，「错写=正确」规则精确替换（借鉴 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) 的音素热词）；同时作为 Qwen3-ASR 的上下文与 Fun-ASR-Nano 的热词 |
+| 专业词汇 | 法律术语校正（同音写错的「新政」→「心证」等，按声调和分词严格匹配）；自定义专有名词（当事人、公司）按近音改回，「错写=正确」规则精确替换（借鉴 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) 的音素热词）；同时作为 Qwen3-ASR 的上下文 |
 | 记录 | 每次录音保存转写和 16 kHz 录音，录音过程中自动存盘，崩溃后可恢复 |
 | 润色 | 录音记录 → 更多 → 润色：本机 Qwen3-4B（llama.cpp）把转写整理成书面记录（去口头禅和口吃、连起被切断的句子、修同音错字），按发言段进行，原话意思和顺序不变；改写过度的段落自动保留原文；原文与润色稿可切换、导出（仅 macOS） |
 | 首页 | 横条：开始录音 · 录音记录 · 设置；实时字幕、录音记录、设置都是从横条向下展开的卡片（macOS 悬浮在最前，不抢焦点） |
@@ -50,7 +50,7 @@ xcodebuild -project Yuyin.xcodeproj -scheme Yuyin-iOS -configuration Debug \
 
 ## 使用
 
-1. **设置 → 模型**：下载「流式 Zipformer」和「Fun-ASR-Nano（推荐）」（约 800 MB）；想省空间可选「Paraformer-large 中文」（会自动带上标点模型）。多人识别再下载「说话人声纹」（CAM++，约 28 MB）。
+1. **设置 → 模型**：下载「X-ASR 流式 · 低延迟」和「Qwen3-ASR 1.7B」（Mac，约 2.8 GB）；iPhone / iPad 或想省空间可选「Paraformer-large 中文」（会自动带上标点模型）。多人识别再下载「说话人声纹」（CAM++，约 28 MB）。
 2. 点横条上「开始录音」下方的「麦克风 · 纯离线」选择音源和模式：录会议选「会议」或「系统声音」，只录某个 App 选「指定应用」。首次录系统声音时 macOS 会请求「录制系统音频」权限。
 3. 点「开始录音」（⌘R）。横条下方显示最新两句：上一句变暗，当前句较大；正在听的句子标「识别中」，字色稍暗，定稿后变亮；蓝色是译文。点「展开」可查看完整的实时会议记录。点说话人名字可以命名，或更正这句的说话人。
 4. 点「结束」后会等最后几句纠错、翻译完成再保存，横条下方出现「已保存」卡片，可以直接导出或查看记录。
@@ -62,7 +62,7 @@ xcodebuild -project Yuyin.xcodeproj -scheme Yuyin-iOS -configuration Debug \
 
 > iOS 不允许录制其他 App 的声音，iPhone / iPad 上只能用麦克风。
 
-也可以用脚本下载模型：`bash Models/download.sh [--with-firered]`。未沙盒的开发版会直接读取；签名（沙盒）版请在设置里用「导入已下载的模型文件夹…」导入。
+也可以用脚本下载模型：`bash Models/download.sh`。未沙盒的开发版会直接读取；签名（沙盒）版请在设置里用「导入已下载的模型文件夹…」导入。
 
 ## 测试
 
@@ -91,7 +91,7 @@ docs/                 设计文档与测试清单
 
 | 依赖 | 用途 |
 |------|------|
-| sherpa-onnx | 流式 Zipformer；离线 SenseVoice / Paraformer / FireRed；说话人模型 |
+| sherpa-onnx | 流式 X-ASR；离线 SenseVoice / Paraformer；说话人声纹 |
 | llama.cpp | Qwen3-ASR 1.7B（GGUF，音频经 mtmd 输入，Metal 加速；仅 macOS） |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | 断句时判断有没有人在说话（MIT，随 App 内置） |
 | FluidAudio | SenseVoice CoreML（神经网络引擎） |

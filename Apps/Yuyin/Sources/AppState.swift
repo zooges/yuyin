@@ -67,8 +67,8 @@ final class ModelManager {
 
     func install(_ kind: ModelKind) {
         guard tasks[kind] == nil else { return }
-        // Paraformer / FireRed output no punctuation; fetch the small punctuation model with them.
-        if (kind == .paraformer || kind == .fireRed) && !installed.contains(.punctuation) {
+        // Paraformer outputs no punctuation; fetch the small punctuation model with it.
+        if kind == .paraformer && !installed.contains(.punctuation) {
             install(.punctuation)
         }
         progress[kind] = InstallProgress(phase: .downloading, fraction: 0)

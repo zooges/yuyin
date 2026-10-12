@@ -1,7 +1,7 @@
 import Foundation
 
 public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Identifiable {
-    /// Sherpa X-ASR or Zipformer if installed, otherwise on-device Apple Speech.
+    /// Sherpa X-ASR if installed, otherwise on-device Apple Speech.
     case auto
     /// The lowest-latency installed model (X-ASR 160 ms).
     case fast
@@ -25,12 +25,9 @@ public enum CorrectorChoice: String, Codable, CaseIterable, Sendable, Identifiab
     /// Best installed local model.
     case auto
     case qwen3ASRLarge
-    case funASRNano
     case paraformer
     case senseVoiceANE
     case senseVoice
-    case fireRed
-    case qwen3ASR
     case appleSpeech
     /// Keep the streaming text as final.
     case none
@@ -43,10 +40,7 @@ public enum CorrectorChoice: String, Codable, CaseIterable, Sendable, Identifiab
         case .senseVoiceANE: return "SenseVoice · 神经网络引擎"
         case .senseVoice: return "SenseVoice · Sherpa"
         case .paraformer: return "Paraformer-large（纯中文）"
-        case .fireRed: return "FireRedASR 大模型"
         case .qwen3ASRLarge: return "Qwen3-ASR 1.7B（推荐，Mac）"
-        case .funASRNano: return "Fun-ASR-Nano（中英混说）"
-        case .qwen3ASR: return "Qwen3-ASR 大模型"
         case .appleSpeech: return "系统语音识别（本机）"
         case .none: return "不纠错"
         }
@@ -74,7 +68,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Put legal terms back where the recognizer wrote a same-sounding word (`LegalVocabulary`).
     public var legalTerms: Bool
     /// The user's own terms (parties, companies, people): corrected the same way, and given to
-    /// recognizers that take hotwords.
+    /// Qwen3-ASR as context.
     public var vocabulary: [String]
     /// The user's note on what is being recorded, for recognizers that read context.
     public var contextNote: String
@@ -120,13 +114,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    /// Hotwords for recognizers that take them: the user's terms and rule targets. Fun-ASR-Nano
-    /// fits prompt, audio and text in 512 tokens; ~120 legal terms left no room and every
-    /// sentence came back empty.
-    public var hotwords: String {
-        TermLexicon(names: vocabulary).hotwords.prefix(20).joined(separator: ",")
-    }
-
     /// What recognizers that read context (Qwen3-ASR 1.7B) are told about the recording: the
     /// domain, the user's note and the terms to expect. On the user's legal meeting this got
     /// names and terms right far more often ("成都航天" 6× vs 2×, "律师" 8× vs 2×).
@@ -150,7 +137,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case mode, streamingEngine, corrector, silenceMs, maxUtteranceSeconds, speakerLabeling, expectedSpeakers
         case translation, audioSource, audioAppBundleID, floatOnTop, legalTerms, vocabulary, contextNote
         // v0.1 keys
-        case preferSherpaWhenAvailable, preferFireRedCorrector, enableSpeakerLabeling, expectedSpeakerCount
+        case preferSherpaWhenAvailable, enableSpeakerLabeling, expectedSpeakerCount
     }
 
     public init(from decoder: Decoder) throws {
@@ -163,11 +150,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         maxUtteranceSeconds = storedMax == 25 ? defaults.maxUtteranceSeconds : storedMax
 
         let legacySherpa = try? c.decodeIfPresent(Bool.self, forKey: .preferSherpaWhenAvailable)
-        let legacyFireRed = try? c.decodeIfPresent(Bool.self, forKey: .preferFireRedCorrector)
         streamingEngine = (try? c.decodeIfPresent(StreamingEngineChoice.self, forKey: .streamingEngine))
             ?? (legacySherpa == false ? .appleSpeech : defaults.streamingEngine)
         corrector = (try? c.decodeIfPresent(CorrectorChoice.self, forKey: .corrector))
-            ?? (legacySherpa == false ? .appleSpeech : legacyFireRed == true ? .fireRed : defaults.corrector)
+            ?? (legacySherpa == false ? .appleSpeech : defaults.corrector)
         speakerLabeling = (try? c.decodeIfPresent(Bool.self, forKey: .speakerLabeling))
             ?? (try? c.decodeIfPresent(Bool.self, forKey: .enableSpeakerLabeling))
             ?? defaults.speakerLabeling

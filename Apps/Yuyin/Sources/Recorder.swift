@@ -54,7 +54,7 @@ final class Recorder {
         var a = Utterance(startMs: 3_200, endMs: 6_100, partial: "我们先过一下这周的进度",
                           finalText: "我们先过一下这周的进度。", status: .final, provider: "ane-sensevoice", speakerIndex: 0)
         a.translation = "Let's go over this week's progress first."
-        let b = Utterance(startMs: 6_800, partial: "好的，设计稿周三已经交付了，接下来", status: .partial, provider: "sherpa-zipformer")
+        let b = Utterance(startMs: 6_800, partial: "好的，设计稿周三已经交付了，接下来", status: .partial, provider: "sherpa-x-asr-160ms")
         var extra: [Utterance] = []
         let lines = ["我们先过一下这周的进度。", "设计稿周三已经交付了，开发这边预计下周二提测。", "测试环境的数据库还要再扩容一下。",
                      "好的，那我们周五前把方案定下来。", "Let's sync again on Friday morning.", "没问题，我会整理一份会议纪要发到群里。"]
@@ -68,7 +68,7 @@ final class Recorder {
         speakers.rename(0, to: "张三")
         rawUtterances = [a] + extra + [b]
         utterances = rawUtterances.map(speakers.resolve)
-        engineInfo = EngineInfo(streaming: "sherpa-zipformer", corrector: "ane-sensevoice", speakerLabeling: true, translator: "apple-translation")
+        engineInfo = EngineInfo(streaming: "sherpa-x-asr-160ms", corrector: "ane-sensevoice", speakerLabeling: true, translator: "apple-translation")
         elapsedMs = 6_900
         level = 0.4
         if mode == "done" {

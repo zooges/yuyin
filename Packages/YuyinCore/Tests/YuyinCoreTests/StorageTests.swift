@@ -60,7 +60,7 @@ final class StorageTests: XCTestCase {
         let store = SettingsStore(defaults: defaults, secrets: secrets)
         XCTAssertEqual(store.settings.mode, .hybrid)
         XCTAssertEqual(store.settings.silenceMs, 900)
-        XCTAssertEqual(store.settings.corrector, .fireRed)
+        XCTAssertEqual(store.settings.corrector, .auto, "the retired FireRed choice falls back to automatic")
         XCTAssertEqual(store.settings.streamingEngine, .auto)
         XCTAssertTrue(store.settings.speakerLabeling)
         XCTAssertEqual(store.settings.expectedSpeakers, 3)

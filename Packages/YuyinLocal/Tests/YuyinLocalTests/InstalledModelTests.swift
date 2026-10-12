@@ -46,11 +46,11 @@ final class InstalledModelTests: XCTestCase {
     }
 
     func testSherpaStreamingThroughSession() async throws {
-        try XCTSkipUnless(locator.isInstalled(.streamingZipformer), "streaming model not installed")
-        let wav = locator.directory(for: .streamingZipformer).appendingPathComponent("test_wavs/0.wav")
+        try XCTSkipUnless(locator.isInstalled(.streamingXASRFast), "streaming model not installed")
+        let wav = locator.directory(for: .streamingXASRFast).appendingPathComponent("test_wavs/0.wav")
         let speech = try load(wav)
         let engines = LocalEngines(locator: locator)
-        let streaming = try engines.makeStreaming(.sherpa)
+        let streaming = try engines.makeStreaming(.xasrFast)
         let session = TranscriptionSession(
             provider: Fixed(set: EngineSet(streaming: streaming, corrector: nil)),
             settings: AppSettings()
@@ -66,14 +66,14 @@ final class InstalledModelTests: XCTestCase {
         XCTAssertTrue(result.allSatisfy { $0.status == .final })
     }
 
-    /// The whole offline 2-pass path: Zipformer partials → VAD sentence → SenseVoice final.
+    /// The whole offline 2-pass path: X-ASR partials → VAD sentence → SenseVoice final.
     func testOfflineTwoPassEndToEnd() async throws {
-        try XCTSkipUnless(locator.isInstalled(.streamingZipformer) && locator.isInstalled(.senseVoice), "models not installed")
+        try XCTSkipUnless(locator.isInstalled(.streamingXASRFast) && locator.isInstalled(.senseVoice), "models not installed")
         let speech = try load(senseVoiceSample)
         let engines = LocalEngines(locator: locator)
         let session = TranscriptionSession(
             provider: Fixed(set: EngineSet(
-                streaming: try engines.makeStreaming(.sherpa),
+                streaming: try engines.makeStreaming(.xasrFast),
                 corrector: try engines.makeCorrector(.sherpa(.senseVoice))
             )),
             settings: AppSettings()

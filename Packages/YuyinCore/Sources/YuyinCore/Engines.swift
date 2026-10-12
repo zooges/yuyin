@@ -111,25 +111,6 @@ public protocol VoiceActivityDetecting: AnyObject, Sendable {
     func shutdown() async
 }
 
-/// Whole-recording diarization, run after the session.
-public protocol SessionDiarizer: AnyObject, Sendable {
-    func prepare(expectedSpeakers: Int) async throws
-    func diarize(_ samples: [Float]) async throws -> [SpeakerSegment]
-    func shutdown() async
-}
-
-public struct SpeakerSegment: Equatable, Sendable {
-    public let startMs: Int
-    public let endMs: Int
-    public let speakerIndex: Int
-
-    public init(startMs: Int, endMs: Int, speakerIndex: Int) {
-        self.startMs = startMs
-        self.endMs = endMs
-        self.speakerIndex = speakerIndex
-    }
-}
-
 public struct EngineSet: Sendable {
     public var streaming: any StreamingASREngine
     public var corrector: (any CorrectorASREngine)?

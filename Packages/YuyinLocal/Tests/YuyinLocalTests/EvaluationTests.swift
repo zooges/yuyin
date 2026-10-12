@@ -117,8 +117,10 @@ extension EvaluationTests {
         let segments = Self.sileroSegments(audio)
         print("SILERO segments:", segments.map { String(format: "%.2f-%.2f", Double($0.start) / 16000, Double($0.start + $0.samples.count) / 16000) }.joined(separator: " "))
 
-        var models: [(String, ModelLocator, URL?)] = [("bilingual-2023", .standard, nil)]
-        if let zh = Self.dir("sherpa-onnx-streaming-zipformer-zh-int8") { models.append(("zh-2025", .standard, zh)) }
+        let models: [(String, ModelLocator, URL?)] = [
+            ("x-asr-160ms", .standard, nil),
+            ("x-asr-480ms", .standard, ModelLocator.standard.directory(for: .streamingXASR)),
+        ]
         for (name, locator, dir) in models {
             for (label, input) in [("raw", audio), ("norm", Self.normalize(audio))] {
                 let engine = SherpaStreamingEngine(files: try locator.streamingFiles(in: dir))
@@ -230,8 +232,6 @@ extension EvaluationTests {
         }
         for (name, prefix, kind, model) in [
             ("Paraformer", "sherpa-onnx-paraformer-zh-2023", SherpaOfflineCorrector.Kind.paraformer, ModelKind.paraformer),
-            ("FunASR-Nano", "sherpa-onnx-funasr-nano", .funASRNano, .funASRNano),
-            ("Qwen3-ASR", "sherpa-onnx-qwen3-asr", .qwen3, .qwen3ASR),
         ] {
             if let dir = Self.dir(prefix), let files = try? std.offlineFiles(model, in: dir) {
                 candidates.append((name, SherpaOfflineCorrector(kind: kind, files: files)))
@@ -331,7 +331,7 @@ extension EvaluationTests {
     func testImportEvaluatedModels() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["YUYIN_EVAL_IMPORT"] == "1")
         let installer = ModelInstaller()
-        for prefix in ["sherpa-onnx-paraformer-zh-2023", "sherpa-onnx-punct-ct-transformer", "sherpa-onnx-funasr-nano"] {
+        for prefix in ["sherpa-onnx-paraformer-zh-2023", "sherpa-onnx-punct-ct-transformer"] {
             let dir = try XCTUnwrap(Self.dir(prefix), prefix)
             let kind = try await installer.importFolder(dir)
             print("IMPORTED \(prefix) → \(kind) installed=\(ModelLocator.standard.isInstalled(kind))")
@@ -386,12 +386,11 @@ extension EvaluationTests {
 
 extension EvaluationTests {
     /// Full session replay with one corrector (YUYIN_EVAL_CORRECTOR = sensevoice | ane | paraformer
-    /// | firered | funasr | qwen3 | none). Models come from the app directory or YUYIN_EVAL_MODELS.
+    /// | qwen-raw | qwen-large | production | none). Models come from the app directory or YUYIN_EVAL_MODELS.
     func testSessionReplayWithCorrector() async throws {
         let audio = try WAVFile.read(try XCTUnwrap(wav))
         let env = ProcessInfo.processInfo.environment
         let name = env["YUYIN_EVAL_CORRECTOR"] ?? "paraformer"
-        let hotwords = env["YUYIN_EVAL_HOTWORDS"].map { (try? String(contentsOfFile: $0, encoding: .utf8)) ?? $0 } ?? ""
         let std = ModelLocator.standard
         func files(_ kind: ModelKind, _ prefix: String) throws -> OfflineModelFiles {
             if std.isInstalled(kind) { return try std.offlineFiles(kind) }
@@ -405,12 +404,6 @@ extension EvaluationTests {
         case "ane": corrector = FluidSenseVoiceCorrector(directory: std.directory(for: .senseVoiceANE))
         case "paraformer": corrector = SherpaOfflineCorrector(kind: .paraformer, files: try files(.paraformer, "sherpa-onnx-paraformer-zh-2023"),
                                                               punctuationModel: try? std.singleModel(.punctuation))
-        case "firered": corrector = SherpaOfflineCorrector(kind: .fireRed, files: try files(.fireRed, "sherpa-onnx-fire-red-asr"),
-                                                           punctuationModel: try? std.singleModel(.punctuation))
-        case "funasr": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"), hotwords: hotwords)
-        case "funasr-zh": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"),
-                                                             hotwords: hotwords, promptLanguage: "中文")
-        case "qwen3": corrector = SherpaOfflineCorrector(kind: .qwen3, files: try files(.qwen3ASR, "sherpa-onnx-qwen3-asr"), hotwords: hotwords)
         case "qwen-raw":
             // Qwen3-ASR 1.7B without the hallucination guard around it.
             let files = try std.ggufFiles()
@@ -617,7 +610,7 @@ extension EvaluationTests {
     /// reference RTTM, e.g. an AMI meeting.
     ///
     ///     YUYIN_EVAL_WAV=<16 kHz mono wav> YUYIN_EVAL_RTTM=<rttm> [YUYIN_EVAL_LIMIT_SEC=600]
-    ///     [YUYIN_EVAL_SPEAKER_MODEL=<onnx>] [YUYIN_EVAL_THRESHOLD=0.4] [YUYIN_EVAL_DIARIZE=1]
+    ///     [YUYIN_EVAL_SPEAKER_MODEL=<onnx>] [YUYIN_EVAL_THRESHOLD=0.4]
     ///     plus the segmentation knobs of `testSessionReplayWithCorrector`.
     func testSpeakerReplay() async throws {
         let env = ProcessInfo.processInfo.environment
@@ -661,20 +654,6 @@ extension EvaluationTests {
         let name = URL(fileURLWithPath: model).deletingPathExtension().lastPathComponent
         print("REPLAY \(name) VAD \(env["YUYIN_EVAL_VAD"] ?? "silero") change \(env["YUYIN_EVAL_CHANGE"] ?? "0.5") threshold \(clusterer.threshold) short \(segmentation.shortSentenceMs)/\(segmentation.shortSentenceSilenceMs) silence \(settings.silenceMs)")
         Self.scoreSpeakers(utterances.map { ($0.startMs, $0.endMs ?? $0.startMs, $0.speakerIndex) }, reference: reference, label: "live")
-
-        if env["YUYIN_EVAL_DIARIZE"] == "1" {
-            for threshold in [Float(0.5), 0.6, 0.7] {
-                let diarizer = SherpaSessionDiarizer(segmentationModel: try ModelLocator.standard.singleModel(.speakerSegmentation),
-                                                     embeddingModel: model, clusterThreshold: threshold)
-                try await diarizer.prepare(expectedSpeakers: 0)
-                let t0 = Date()
-                let segments = try await diarizer.diarize(audio)
-                let mapping = SpeakerMapping.map(utterances, segments: segments)
-                Self.scoreSpeakers(utterances.map { ($0.startMs, $0.endMs ?? $0.startMs, mapping[$0.id] ?? nil) }, reference: reference,
-                                   label: String(format: "analysis %.1f (%.0fs)", threshold, Date().timeIntervalSince(t0)))
-                await diarizer.shutdown()
-            }
-        }
     }
 
     /// YUYIN_EVAL_CHANGE=off | <similarity>: speaker changes inside a sentence.
@@ -788,45 +767,7 @@ extension EvaluationTests {
             }
             let name = URL(fileURLWithPath: model).deletingPathExtension().lastPathComponent
             // "voiced": the sentence's speech ±0.1 s (what the clusterer should hear).
-            var spans = utterances.map { ($0.startMs, $0.endMs ?? $0.startMs) }
-            if env["YUYIN_EVAL_SPLIT"] == "1" {
-                // Speaker changes inside a sentence: local pyannote diarization on its audio.
-                let splitThreshold = env["YUYIN_EVAL_SPLIT_THRESHOLD"].flatMap(Float.init) ?? 0.5
-                let minPiece = env["YUYIN_EVAL_SPLIT_MIN"].flatMap(Int.init) ?? 1000
-                var dconfig = sherpaOnnxOfflineSpeakerDiarizationConfig(
-                    segmentation: sherpaOnnxOfflineSpeakerSegmentationModelConfig(
-                        pyannote: sherpaOnnxOfflineSpeakerSegmentationPyannoteModelConfig(
-                            model: try ModelLocator.standard.singleModel(.speakerSegmentation)), numThreads: 2),
-                    embedding: sherpaOnnxSpeakerEmbeddingExtractorConfig(model: model, numThreads: 2),
-                    clustering: sherpaOnnxFastClusteringConfig(numClusters: -1, threshold: splitThreshold)
-                )
-                let local = SherpaOnnxOfflineSpeakerDiarizationWrapper(config: &dconfig)
-                var out: [(Int, Int)] = []
-                var splitCount = 0
-                let t0 = Date()
-                for (a, b) in spans {
-                    guard b - a >= 3000 else { out.append((a, b)); continue }
-                    let from = max(0, a * 16 - 1600), to = min(audio.count, b * 16 + 1600)
-                    let segs = local.process(samples: Array(audio[from..<to]))
-                    var talk: [Int: Int] = [:]
-                    for g in segs { talk[g.speaker, default: 0] += Int((g.end - g.start) * 1000) }
-                    guard talk.count > 1, talk.values.filter({ $0 >= minPiece }).count > 1 else { out.append((a, b)); continue }
-                    // Runs of one speaker; back-channels shorter than minPiece join their neighbour.
-                    var runs: [(start: Int, end: Int, speaker: Int)] = []
-                    for g in segs.sorted(by: { $0.start < $1.start }) {
-                        let gs = from / 16 + Int(g.start * 1000), ge = from / 16 + Int(g.end * 1000)
-                        if let last = runs.last, last.speaker == g.speaker || talk[g.speaker, default: 0] < minPiece {
-                            runs[runs.count - 1].end = max(last.end, ge)
-                        } else {
-                            runs.append((gs, ge, g.speaker))
-                        }
-                    }
-                    if runs.count > 1 { splitCount += 1 }
-                    out += runs.map { (max(a, $0.start), min(b, $0.end)) }.filter { $0.1 > $0.0 }
-                }
-                print(String(format: "  split %d of %d sentences into %d pieces (%.1fs)", splitCount, spans.count, out.count, Date().timeIntervalSince(t0)))
-                spans = out
-            }
+            let spans = utterances.map { ($0.startMs, $0.endMs ?? $0.startMs) }
             // YUYIN_EVAL_WHOLE=1: from the previous sentence's end, like a contiguous segment.
             let whole = env["YUYIN_EVAL_WHOLE"] == "1"
             let embs = spans.indices.map { i in
@@ -1036,7 +977,7 @@ extension EvaluationTests {
     func testStreamingTimestampsRestartAfterReset() throws {
         let audio = try WAVFile.read(try XCTUnwrap(wav))
         let locator = ModelLocator.standard
-        let dir = locator.directory(for: locator.isInstalled(.streamingXASR) ? .streamingXASR : .streamingZipformer)
+        let dir = locator.directory(for: locator.isInstalled(.streamingXASR) ? .streamingXASR : .streamingXASRFast)
         let files = try locator.streamingFiles(in: dir)
         let modelConfig = sherpaOnnxOnlineModelConfig(
             tokens: files.tokens,

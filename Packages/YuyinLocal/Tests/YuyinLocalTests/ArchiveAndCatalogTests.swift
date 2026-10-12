@@ -97,7 +97,7 @@ final class ArchiveAndCatalogTests: XCTestCase {
 
     func testLocatorPrefersInt8EncoderAndFullDecoder() throws {
         let locator = ModelLocator(root: tmp, fluidRoot: tmp.appendingPathComponent("fluid"))
-        let dir = locator.directory(for: .streamingZipformer)
+        let dir = locator.directory(for: .streamingXASRFast)
         try FileManager.default.createDirectory(at: dir.appendingPathComponent("test_wavs"), withIntermediateDirectories: true)
         for name in ["tokens.txt", "encoder-epoch-99-avg-1.onnx", "encoder-epoch-99-avg-1.int8.onnx",
                      "decoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.int8.onnx",
@@ -105,7 +105,7 @@ final class ArchiveAndCatalogTests: XCTestCase {
             try Data().write(to: dir.appendingPathComponent(name))
         }
         XCTAssertFalse(locator.isInstalled(.senseVoice), "empty dirs from v0.1 are not 'installed'")
-        XCTAssertTrue(locator.isInstalled(.streamingZipformer))
+        XCTAssertTrue(locator.isInstalled(.streamingXASRFast))
         let files = try locator.streamingFiles()
         XCTAssertTrue(files.encoder.hasSuffix("encoder-epoch-99-avg-1.int8.onnx"))
         XCTAssertTrue(files.decoder.hasSuffix("decoder-epoch-99-avg-1.onnx"))

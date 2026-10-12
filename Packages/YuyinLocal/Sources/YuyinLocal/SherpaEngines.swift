@@ -42,7 +42,7 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
     private let queue = DispatchQueue(label: "app.yuyin.sherpa.streaming", qos: .userInitiated)
     private var recognizer: SherpaOnnxRecognizer?
 
-    public init(files: StreamingModelFiles, providerID: String = "sherpa-zipformer") {
+    public init(files: StreamingModelFiles, providerID: String = "sherpa-x-asr") {
         self.files = files
         self.providerID = providerID
     }
@@ -130,14 +130,11 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
     }
 }
 
-/// Offline second pass (SenseVoice / Paraformer / FireRed), as in SherpaOnnx2Pass.
+/// Offline second pass (SenseVoice / Paraformer), as in SherpaOnnx2Pass.
 public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendable {
     public enum Kind: String, Sendable {
         case senseVoice
         case paraformer
-        case fireRed
-        case qwen3
-        case funASRNano
     }
 
     public let providerID: String
@@ -146,56 +143,36 @@ public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendab
     private let queue = DispatchQueue(label: "app.yuyin.sherpa.offline", qos: .userInitiated)
     private var recognizer: SherpaOnnxOfflineRecognizer?
 
-    /// Comma-separated terms the LLM-based models (Qwen3-ASR, Fun-ASR-Nano) should favour.
-    private let hotwords: String
-    /// CT-Transformer punctuation for models that output none (Paraformer, FireRed).
+    /// CT-Transformer punctuation for models that output none (Paraformer).
     private let punctuationModel: String?
     private var punctuation: SherpaOnnxOfflinePunctuationWrapper?
 
     /// SenseVoice language: "zh" (best for short Mandarin), "en", or "auto".
     private let language: String
-    /// Fun-ASR-Nano prompt language ("中文" → "语音转写成中文："); empty lets the model decide.
-    private let promptLanguage: String
 
-    public init(kind: Kind, files: OfflineModelFiles, hotwords: String = "", punctuationModel: String? = nil,
-                language: String = "zh", promptLanguage: String = "") {
+    public init(kind: Kind, files: OfflineModelFiles, punctuationModel: String? = nil, language: String = "zh") {
         self.kind = kind
         self.files = files
-        self.hotwords = hotwords
         self.language = language
-        self.promptLanguage = promptLanguage
         self.punctuationModel = punctuationModel
         switch kind {
         case .senseVoice: providerID = language == "zh" ? "sherpa-sensevoice" : "sherpa-sensevoice-\(language)"
         case .paraformer: providerID = "sherpa-paraformer"
-        case .fireRed: providerID = "sherpa-firered"
-        case .qwen3: providerID = "sherpa-qwen3-asr"
-        case .funASRNano: providerID = "sherpa-funasr-nano"
         }
     }
 
     public func prepare() async throws {
         let kind = kind
         let files = files
-        let hotwords = hotwords
         let language = language
-        let promptLanguage = promptLanguage
         try await SherpaRuntime.run(on: queue) { [self] in
             // The C config structs are not re-exported by the SherpaOnnx module, so each
             // branch builds its recognizer with inferred types (as in swift-api-examples).
-            switch files.layout {
-            case .single(let model):
-                try SherpaRuntime.checkFiles([model, files.tokens], model: providerID)
-            case .encoderDecoder(let encoder, let decoder):
-                try SherpaRuntime.checkFiles([encoder, decoder, files.tokens], model: providerID)
-            case .qwen3(let conv, let encoder, let decoder, _):
-                try SherpaRuntime.checkFiles([conv, encoder, decoder], model: providerID)
-            case .funASRNano(let adaptor, let llm, let embedding, _):
-                try SherpaRuntime.checkFiles([adaptor, llm, embedding], model: providerID)
-            }
+            guard case .single(let model) = files.layout else { throw ASRError.modelMissing(kind.rawValue) }
+            try SherpaRuntime.checkFiles([model, files.tokens], model: providerID)
             let feat = sherpaOnnxFeatureConfig(sampleRate: AudioSpec.sampleRate, featureDim: 80)
-            switch (kind, files.layout) {
-            case (.senseVoice, .single(let model)):
+            switch kind {
+            case .senseVoice:
                 let modelConfig = sherpaOnnxOfflineModelConfig(
                     tokens: files.tokens,
                     numThreads: SherpaRuntime.threads,
@@ -207,7 +184,7 @@ public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendab
                 )
                 var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)
                 recognizer = SherpaOnnxOfflineRecognizer(config: &config)
-            case (.paraformer, .single(let model)):
+            case .paraformer:
                 let modelConfig = sherpaOnnxOfflineModelConfig(
                     tokens: files.tokens,
                     paraformer: sherpaOnnxOfflineParaformerModelConfig(model: model),
@@ -216,38 +193,6 @@ public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendab
                 )
                 var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)
                 recognizer = SherpaOnnxOfflineRecognizer(config: &config)
-            case (.fireRed, .encoderDecoder(let encoder, let decoder)):
-                let modelConfig = sherpaOnnxOfflineModelConfig(
-                    tokens: files.tokens,
-                    numThreads: SherpaRuntime.threads,
-                    fireRedAsr: sherpaOnnxOfflineFireRedAsrModelConfig(encoder: encoder, decoder: decoder)
-                )
-                var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)
-                recognizer = SherpaOnnxOfflineRecognizer(config: &config)
-            case (.qwen3, .qwen3(let conv, let encoder, let decoder, let tokenizer)):
-                let modelConfig = sherpaOnnxOfflineModelConfig(
-                    tokens: "",
-                    numThreads: SherpaRuntime.threads,
-                    qwen3Asr: sherpaOnnxOfflineQwen3ASRModelConfig(
-                        convFrontend: conv, encoder: encoder, decoder: decoder, tokenizer: tokenizer,
-                        hotwords: hotwords
-                    )
-                )
-                var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)
-                recognizer = SherpaOnnxOfflineRecognizer(config: &config)
-            case (.funASRNano, .funASRNano(let adaptor, let llm, let embedding, let tokenizer)):
-                let modelConfig = sherpaOnnxOfflineModelConfig(
-                    tokens: "",
-                    numThreads: SherpaRuntime.threads,
-                    funasrNano: sherpaOnnxOfflineFunASRNanoModelConfig(
-                        encoderAdaptor: adaptor, llm: llm, embedding: embedding, tokenizer: tokenizer,
-                        language: promptLanguage, hotwords: hotwords
-                    )
-                )
-                var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)
-                recognizer = SherpaOnnxOfflineRecognizer(config: &config)
-            default:
-                throw ASRError.modelMissing(kind.rawValue)
             }
             if let model = punctuationModel, (try? SherpaRuntime.checkFiles([model], model: "punctuation")) != nil {
                 var config = sherpaOnnxOfflinePunctuationConfig(

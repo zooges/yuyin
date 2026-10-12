@@ -109,20 +109,6 @@ final class TextAndSpeakerTests: XCTestCase {
         XCTAssertEqual(capped.assign([0.6, 0.8]), 1)
         XCTAssertEqual(capped.speakerCount, 2)
     }
-
-    func testSpeakerMappingRenumbersByFirstAppearance() {
-        let u1 = Utterance(startMs: 0, endMs: 1000, provider: "x")
-        let u2 = Utterance(startMs: 1200, endMs: 2000, provider: "x")
-        let u3 = Utterance(startMs: 9000, endMs: 9500, provider: "x")
-        let segments = [
-            SpeakerSegment(startMs: 0, endMs: 1100, speakerIndex: 3),
-            SpeakerSegment(startMs: 1100, endMs: 2100, speakerIndex: 0),
-        ]
-        let map = SpeakerMapping.map([u3, u2, u1], segments: segments)
-        XCTAssertEqual(map[u1.id], .some(0))
-        XCTAssertEqual(map[u2.id], .some(1))
-        XCTAssertEqual(map[u3.id], .some(nil))
-    }
 }
 
 final class ChineseSpacingTests: XCTestCase {
@@ -225,11 +211,6 @@ final class VocabularyTests: XCTestCase {
     func testParsingSplitsOnChineseAndLatinSeparatorsAndDropsDuplicates() {
         XCTAssertEqual(AppSettings.parseVocabulary("长城汽车，成都航天、 徐律师\n长城汽车;ABC"), ["长城汽车", "成都航天", "徐律师", "ABC"])
         XCTAssertEqual(AppSettings.parseVocabulary(" ，\n "), [])
-    }
-
-    func testHotwordsStayWithinTheLLMPromptBudget() {
-        let settings = AppSettings(vocabulary: (1...40).map { "名词\($0)" })
-        XCTAssertEqual(settings.hotwords.split(separator: ",").count, 20)
     }
 }
 

@@ -34,19 +34,13 @@ download_one() {
   echo "✓ Installed ${name} → ${dest_dir}"
 }
 
-download_one "streaming-zipformer-zh-en" \
-  "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2" \
-  "${APP_SUPPORT}/streaming-zipformer-zh-en"
+download_one "streaming-x-asr-160ms" \
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2" \
+  "${APP_SUPPORT}/streaming-x-asr-160ms"
 
 download_one "sensevoice-small" \
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2" \
   "${APP_SUPPORT}/sensevoice-small"
-
-if [[ "${1:-}" == "--with-firered" ]]; then
-  download_one "firered-asr-large" \
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16.tar.bz2" \
-    "${APP_SUPPORT}/firered-asr-large"
-fi
 
 echo ""
 echo "Done. 未沙盒的开发版会直接读取上述目录；签名（沙盒）版请在 App 设置 → 模型 →「导入已下载的模型文件夹…」中选择这些目录。"

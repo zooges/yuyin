@@ -76,38 +76,8 @@ public struct OnlineSpeakerClusterer: Sendable {
     }
 }
 
-public enum SpeakerMapping {
-    /// Assigns each utterance the speaker with the largest time overlap.
-    /// Speakers are renumbered by first appearance; utterances without overlap get nil.
-    public static func map(_ utterances: [Utterance], segments: [SpeakerSegment]) -> [UUID: Int?] {
-        var raw: [(UUID, Int?)] = []
-        for u in utterances.sorted(by: { $0.startMs < $1.startMs }) {
-            let end = max(u.endMs ?? u.startMs, u.startMs + 1)
-            var best: Int?
-            var bestOverlap = 0
-            for s in segments {
-                let overlap = min(end, s.endMs) - max(u.startMs, s.startMs)
-                if overlap > bestOverlap {
-                    bestOverlap = overlap
-                    best = s.speakerIndex
-                }
-            }
-            raw.append((u.id, best))
-        }
-
-        var renumber: [Int: Int] = [:]
-        var out: [UUID: Int?] = [:]
-        for (id, speaker) in raw {
-            guard let speaker else {
-                out[id] = .some(nil)
-                continue
-            }
-            if renumber[speaker] == nil { renumber[speaker] = renumber.count }
-            out[id] = renumber[speaker]
-        }
-        return out
-    }
-}
+/// Carrying speaker names over when sentences get new speaker numbers.
+public enum SpeakerMapping {}
 
 /// User edits to speaker labels: names, merges and per-sentence corrections.
 /// Applied on top of what the clusterer produced, during or after a recording.

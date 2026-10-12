@@ -97,7 +97,13 @@ final class Recorder {
         notice = nil
         completedMeetingID = nil
 
-        let settings = preferences.settings
+        var settings = preferences.settings
+        #if DEBUG
+        // -YuyinMode offline|hybrid|cloud: try another mode without changing the saved settings.
+        if let mode = UserDefaults.standard.string(forKey: "YuyinMode").flatMap(TranscriptMode.init(rawValue:)) {
+            settings.mode = mode
+        }
+        #endif
         if settings.audioSource.usesMicrophone {
             guard await AudioCapture.requestMicrophonePermission() else {
                 errorMessage = ASRError.permissionDenied("麦克风").localizedDescription
@@ -268,7 +274,17 @@ final class Recorder {
             #if DEBUG
             let latency = LatencyLog.shared
             #endif
+            #if DEBUG
+            var previousChunk: UInt64?
+            #endif
             for await chunk in stream {
+                #if DEBUG
+                if let previousChunk {
+                    latency?.note(String(format: "chunk %d samples (%.0f ms) after %.0f ms", chunk.samples.count,
+                                         Double(chunk.samples.count) / 16, Double(chunk.captured - previousChunk) / 1e6))
+                }
+                previousChunk = chunk.captured
+                #endif
                 await session.ingest(chunk.samples)
                 #if DEBUG
                 latency?.ingested(captured: chunk.captured)
@@ -336,6 +352,11 @@ final class Recorder {
     }
 
     private func apply(_ event: TranscriptEvent) {
+        #if DEBUG
+        if case .upsert(let u) = event {
+            LatencyLog.shared?.note("\(u.status == .final ? "final" : u.status == .partial ? "live " : "wait ") \(u.provider) \(u.displayText)")
+        }
+        #endif
         switch event {
         case .phase(let next):
             phase = next
@@ -434,6 +455,14 @@ final class LatencyLog: @unchecked Sendable {
 
     func mainThread(scheduled: UInt64) {
         record { $0.mainMax = max($0.mainMax, Self.seconds(since: scheduled)) }
+    }
+
+    /// One line right away, with the time since recording started.
+    func note(_ text: String) {
+        lock.withLock {
+            let line = String(format: "t=%.2fs %@\n", Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9, text)
+            handle?.write(Data(line.utf8))
+        }
     }
 
     private func record(_ update: (LatencyLog) -> Void) {

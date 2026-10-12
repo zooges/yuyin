@@ -113,6 +113,7 @@ enum EngineNames {
         switch providerID {
         case "sherpa-zipformer", "sherpa-streaming-zipformer": return "Zipformer"
         case "sherpa-x-asr": return "X-ASR"
+        case "sherpa-x-asr-160ms": return "X-ASR 低延迟"
         case "apple-speech", "apple-speech-offline", "apple-speech-corrector": return "系统识别"
         case "funasr-realtime": return "Fun-ASR 实时"
         case "funasr-cloud", "funasr-correct": return "Fun-ASR 云端"

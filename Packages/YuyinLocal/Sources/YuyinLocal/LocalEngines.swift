@@ -5,6 +5,7 @@ import YuyinCore
 /// engine construction and the UI summary, so what the UI shows is what runs.
 public struct LocalEngines: Sendable {
     public enum Streaming: Equatable, Sendable {
+        case xasrFast
         case xasr
         /// Zipformer (2023), before X-ASR.
         case sherpa
@@ -36,18 +37,25 @@ public struct LocalEngines: Sendable {
     // MARK: - Resolution
 
     public func resolveStreaming(_ choice: StreamingEngineChoice) throws -> Streaming {
-        // X-ASR when installed: on the user's legal meeting its live text had ~40% fewer errors.
-        let sherpa: Streaming? = locator.isInstalled(.streamingXASR) ? .xasr
+        // X-ASR when installed: on the user's legal meeting its live text had ~40% fewer errors
+        // than Zipformer. The 160 ms model shows text sooner (0.30 s vs 0.48 s after speech);
+        // the user found live text slow, and corrections replace it within seconds anyway.
+        let accurate: Streaming? = locator.isInstalled(.streamingXASR) ? .xasr
+            : locator.isInstalled(.streamingXASRFast) ? .xasrFast
             : locator.isInstalled(.streamingZipformer) ? .sherpa : nil
+        let fast: Streaming? = locator.isInstalled(.streamingXASRFast) ? .xasrFast : accurate
         switch choice {
+        case .fast:
+            guard let fast else { throw ASRError.modelMissing(ModelKind.streamingXASRFast.title) }
+            return fast
         case .sherpa:
-            guard let sherpa else { throw ASRError.modelMissing(ModelKind.streamingXASR.title) }
-            return sherpa
+            guard let accurate else { throw ASRError.modelMissing(ModelKind.streamingXASR.title) }
+            return accurate
         case .appleSpeech:
             return .appleSpeech
         case .auto:
-            if let sherpa { return sherpa }
-            guard onDeviceSpeech() else { throw ASRError.modelMissing(ModelKind.streamingXASR.title) }
+            if let fast { return fast }
+            guard onDeviceSpeech() else { throw ASRError.modelMissing(ModelKind.streamingXASRFast.title) }
             return .appleSpeech
         }
     }
@@ -105,6 +113,9 @@ public struct LocalEngines: Sendable {
 
     public func makeStreaming(_ plan: Streaming) throws -> any StreamingASREngine {
         switch plan {
+        case .xasrFast:
+            return SherpaStreamingEngine(files: try locator.streamingFiles(in: locator.directory(for: .streamingXASRFast)),
+                                         providerID: "sherpa-x-asr-160ms")
         case .xasr:
             return SherpaStreamingEngine(files: try locator.streamingFiles(in: locator.directory(for: .streamingXASR)),
                                          providerID: "sherpa-x-asr")
@@ -195,6 +206,7 @@ public struct LocalEngines: Sendable {
 public extension LocalEngines.Streaming {
     var title: String {
         switch self {
+        case .xasrFast: return "X-ASR 低延迟"
         case .xasr: return "X-ASR"
         case .sherpa: return "Sherpa Zipformer"
         case .appleSpeech: return "系统语音识别"

@@ -218,7 +218,7 @@ public actor ModelInstaller {
         switch kind {
         case .qwen3ASRLarge:
             return (try? locator.ggufFiles(in: dir)) != nil
-        case .streamingXASR, .streamingZipformer:
+        case .streamingXASRFast, .streamingXASR, .streamingZipformer:
             guard let files = try? locator.streamingFiles(in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: files.tokens).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL
         case .senseVoice, .paraformer, .fireRed:
@@ -244,7 +244,8 @@ public actor ModelInstaller {
         if name.contains("punct"), (try? locator.singleModel(.punctuation, in: folder)) != nil { return .punctuation }
         if (try? locator.offlineFiles(.fireRed, in: folder)) != nil { return .fireRed }
         if (try? locator.streamingFiles(in: folder)) != nil {
-            return name.contains("x-asr") ? .streamingXASR : .streamingZipformer
+            if name.contains("x-asr") { return name.contains("160ms") ? .streamingXASRFast : .streamingXASR }
+            return .streamingZipformer
         }
         if (try? locator.offlineFiles(.senseVoice, in: folder)) != nil {
             if name.contains("paraformer") { return .paraformer }

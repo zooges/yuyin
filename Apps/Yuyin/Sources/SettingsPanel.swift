@@ -313,7 +313,7 @@ private struct ModelSettings: View {
     #endif
 
     private let groups: [(String, [ModelKind])] = [
-        ("实时字幕", [.streamingXASR, .streamingZipformer]),
+        ("实时字幕", [.streamingXASRFast, .streamingXASR, .streamingZipformer]),
         ("句末纠错", (LocalEngines.supportsLlama ? [.qwen3ASRLarge] : [])
             + [.funASRNano, .paraformer, .senseVoiceANE, .senseVoice, .fireRed, .qwen3ASR, .punctuation]),
         ("多人", [.speakerEmbedding]),

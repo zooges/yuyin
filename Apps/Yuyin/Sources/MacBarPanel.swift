@@ -161,6 +161,16 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             }
         }
+        // -YuyinAutoRecord <seconds>: records from the real input for that long, then stops and
+        // deletes the recording (with -YuyinLatencyLog: how the input delivers audio).
+        if let seconds = UserDefaults.standard.object(forKey: "YuyinAutoRecord").flatMap({ Double("\($0)") }) {
+            Task {
+                await container.recorder.start(preferences: container.preferences, models: container.models)
+                try? await Task.sleep(for: .seconds(seconds))
+                if let id = await container.recorder.stop() { await container.library.delete(id) }
+                NSApp.terminate(nil)
+            }
+        }
         // -YuyinOpenAnimation <prefix>: opens 录音记录 and captures frames of the drop-down.
         if let prefix = UserDefaults.standard.string(forKey: "YuyinOpenAnimation") {
             Task {

@@ -3,6 +3,9 @@ import Foundation
 public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Identifiable {
     /// Sherpa X-ASR or Zipformer if installed, otherwise on-device Apple Speech.
     case auto
+    /// The lowest-latency installed model (X-ASR 160 ms).
+    case fast
+    /// The most accurate installed model (X-ASR 480 ms).
     case sherpa
     case appleSpeech
 
@@ -11,7 +14,8 @@ public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Iden
     public var title: String {
         switch self {
         case .auto: return "自动"
-        case .sherpa: return "本机模型（X-ASR / Zipformer）"
+        case .fast: return "本机 · 低延迟"
+        case .sherpa: return "本机 · 标准（更准）"
         case .appleSpeech: return "系统语音识别（本机）"
         }
     }

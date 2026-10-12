@@ -2,6 +2,7 @@ import Foundation
 import YuyinCore
 
 public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
+    case streamingXASRFast
     case streamingXASR
     case streamingZipformer
     case senseVoiceANE
@@ -24,7 +25,8 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .streamingXASR: return "X-ASR 流式（中英，推荐）"
+        case .streamingXASRFast: return "X-ASR 流式 · 低延迟（推荐）"
+        case .streamingXASR: return "X-ASR 流式 · 标准"
         case .streamingZipformer: return "流式 Zipformer（中英，旧版）"
         case .senseVoiceANE: return "SenseVoice · 神经网络引擎"
         case .senseVoice: return "SenseVoice · Sherpa"
@@ -41,7 +43,8 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var role: String {
         switch self {
-        case .streamingXASR: return "实时字幕，自带标点；在法律会议录音上错字比 Zipformer 少约四成"
+        case .streamingXASRFast: return "实时字幕，每 0.16 秒出字，说完约 0.3 秒上屏；错字比标准版略多（纠错会随后替换）"
+        case .streamingXASR: return "实时字幕，自带标点；法律会议录音上错字最少，约 0.5 秒上屏"
         case .streamingZipformer: return "实时字幕"
         case .senseVoiceANE, .senseVoice, .fireRed: return "句末纠错"
         case .paraformer: return "句末纠错，纯中文、速度快（英文句自动交给 SenseVoice），自动配标点"
@@ -56,7 +59,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var approximateSize: String {
         switch self {
-        case .streamingXASR: return "约 130 MB"
+        case .streamingXASRFast, .streamingXASR: return "约 130 MB"
         case .streamingZipformer: return "约 490 MB"
         case .senseVoiceANE: return "约 450 MB"
         case .senseVoice: return "约 160 MB"
@@ -75,8 +78,11 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
     public var remoteURL: URL? {
         let base = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
         switch self {
+        case .streamingXASRFast:
+            // https://github.com/Gilgamesh-J/X-ASR (Apache-2.0). 160 ms chunks: text 0.30 s after
+            // speech (median) vs 0.48 s for 480 ms chunks, which are a little more accurate.
+            return URL(string: base + "asr-models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2")
         case .streamingXASR:
-            // https://github.com/Gilgamesh-J/X-ASR (Apache-2.0); 480 ms chunks: more accurate than 160 ms.
             return URL(string: base + "asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2")
         case .streamingZipformer:
             return URL(string: base + "asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2")
@@ -123,6 +129,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
     /// Directory names are kept from v0.1 so existing installs keep working.
     var directoryName: String {
         switch self {
+        case .streamingXASRFast: return "streaming-x-asr-160ms"
         case .streamingXASR: return "streaming-x-asr-zh-en"
         case .streamingZipformer: return "streaming-zipformer-zh-en"
         case .senseVoice: return "sensevoice-small"
@@ -196,7 +203,7 @@ public struct ModelLocator: Sendable {
         switch kind {
         case .senseVoiceANE:
             return FluidSenseVoiceCorrector.modelsExist(at: directory(for: kind))
-        case .streamingXASR, .streamingZipformer:
+        case .streamingXASRFast, .streamingXASR, .streamingZipformer:
             return (try? streamingFiles(in: directory(for: kind))) != nil
         case .qwen3ASRLarge:
             return (try? ggufFiles(in: directory(for: kind))) != nil

@@ -59,6 +59,10 @@ public actor ModelInstaller {
             try await installFluidSenseVoice(progress: progress)
             return
         }
+        if let files = kind.remoteFiles {
+            try await installFiles(kind, files, progress: progress)
+            return
+        }
         guard let url = kind.remoteURL else { throw ModelInstallError.invalidBundle(kind) }
 
         let fm = FileManager.default
@@ -135,6 +139,38 @@ public actor ModelInstaller {
         }
     }
 
+    /// Plain files into one folder; each file tries its mirrors in order.
+    private func installFiles(_ kind: ModelKind, _ files: [[URL]], progress: @escaping @Sendable (InstallProgress) -> Void) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: locator.root, withIntermediateDirectories: true)
+        let work = locator.root.appendingPathComponent(".install-\(UUID().uuidString)", isDirectory: true)
+        let staged = work.appendingPathComponent("bundle", isDirectory: true)
+        try fm.createDirectory(at: staged, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: work) }
+
+        for (index, mirrors) in files.enumerated() {
+            var lastError: Error = ModelInstallError.invalidBundle(kind)
+            var done = false
+            for url in mirrors where !done {
+                do {
+                    try await FileDownloader.download(url, to: staged.appendingPathComponent(url.lastPathComponent)) { fraction in
+                        progress(InstallProgress(phase: .downloading, fraction: (Double(index) + fraction) / Double(files.count)))
+                    }
+                    done = true
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    lastError = error
+                }
+            }
+            guard done else { throw lastError }
+            try Task.checkCancellation()
+        }
+        progress(InstallProgress(phase: .finishing, fraction: 1))
+        guard validates(kind, at: staged, shallow: true) else { throw ModelInstallError.invalidBundle(kind) }
+        try replace(kind, with: staged)
+    }
+
     private func installFluidSenseVoice(progress: @escaping @Sendable (InstallProgress) -> Void) async throws {
         #if canImport(FluidAudio)
         progress(InstallProgress(phase: .downloading, fraction: 0))
@@ -180,7 +216,9 @@ public actor ModelInstaller {
 
     private func validates(_ kind: ModelKind, at dir: URL, shallow: Bool) -> Bool {
         switch kind {
-        case .streamingZipformer:
+        case .qwen3ASRLarge:
+            return (try? locator.ggufFiles(in: dir)) != nil
+        case .streamingXASR, .streamingZipformer:
             guard let files = try? locator.streamingFiles(in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: files.tokens).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL
         case .senseVoice, .paraformer, .fireRed:
@@ -200,11 +238,14 @@ public actor ModelInstaller {
 
     private func detectKind(of folder: URL) -> ModelKind? {
         let name = folder.lastPathComponent.lowercased()
+        if (try? locator.ggufFiles(in: folder)) != nil { return .qwen3ASRLarge }
         if (try? locator.offlineFiles(.qwen3ASR, in: folder)) != nil { return .qwen3ASR }
         if (try? locator.offlineFiles(.funASRNano, in: folder)) != nil { return .funASRNano }
         if name.contains("punct"), (try? locator.singleModel(.punctuation, in: folder)) != nil { return .punctuation }
         if (try? locator.offlineFiles(.fireRed, in: folder)) != nil { return .fireRed }
-        if (try? locator.streamingFiles(in: folder)) != nil { return .streamingZipformer }
+        if (try? locator.streamingFiles(in: folder)) != nil {
+            return name.contains("x-asr") ? .streamingXASR : .streamingZipformer
+        }
         if (try? locator.offlineFiles(.senseVoice, in: folder)) != nil {
             if name.contains("paraformer") { return .paraformer }
             if name.contains("sense") { return .senseVoice }

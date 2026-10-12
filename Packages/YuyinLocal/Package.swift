@@ -33,8 +33,20 @@ let package = Package(
                 "YuyinBZip2",
                 .product(name: "sherpa-onnx", package: "sherpa-onnx"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                // Qwen3-ASR 1.7B on the GPU; the xcframework has no iOS simulator slice.
+                .target(name: "llama", condition: .when(platforms: [.macOS])),
             ],
-            path: "Sources/YuyinLocal"
+            path: "Sources/YuyinLocal",
+            resources: [
+                // Silero VAD (MIT, https://github.com/snakers4/silero-vad), as released by sherpa-onnx.
+                .copy("Resources/silero_vad.onnx"),
+            ]
+        ),
+        // https://github.com/ggml-org/llama.cpp (MIT): llama + mtmd (audio input), Metal.
+        .binaryTarget(
+            name: "llama",
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b11571/llama-b11571-xcframework.zip",
+            checksum: "c2b150bf5ab4785cf360b246aea621b10c3cb689f3edd7513bbb2c990b504079"
         ),
         .testTarget(
             name: "YuyinLocalTests",

@@ -13,6 +13,8 @@ public actor TranscriptionSession {
 
     private let provider: any EngineProvider
     private let settings: AppSettings
+    /// Domain terms written as same-sounding words are put back, live and final.
+    private let lexicon: TermLexicon
     private let audioSink: (any SessionAudioSink)?
 
     private var phase: SessionPhase = .idle
@@ -33,8 +35,19 @@ public actor TranscriptionSession {
     private var stopWaiters: [CheckedContinuation<[Utterance], Never>] = []
     private var shownNotices: Set<String> = []
 
+    private var waiting: [Float] = []
+    private static let maxWaitingSamples = AudioSpec.samples(forMilliseconds: 60_000)
+
     /// Clips shorter than this are not sent to the speaker labeler.
     private let minLabelSamples = AudioSpec.samples(forMilliseconds: 600)
+
+    /// Speaker changes inside the open sentence (only when speakers are labeled; nil = off).
+    private var changeDetector: SpeakerChangeDetector?
+    /// Speech start of the sentence the detector is following, and where its next window ends.
+    private var changeSentence: Int?
+    private var nextChangeWindowEnd = 0
+    /// Where the streaming recognizer's current sentence began (its token times count from here).
+    private var streamStart = 0
 
     private struct CorrectionJob: Sendable {
         let id: UUID
@@ -53,11 +66,14 @@ public actor TranscriptionSession {
     /// `segmentation` lets evaluations try other thresholds; settings still set the pause and length.
     public init(
         provider: any EngineProvider, settings: AppSettings, audioSink: (any SessionAudioSink)? = nil,
-        segmentation: SegmenterConfig = SegmenterConfig()
+        segmentation: SegmenterConfig = SegmenterConfig(),
+        speakerChanges: SpeakerChangeDetector? = SpeakerChangeDetector()
     ) {
         self.provider = provider
         self.settings = settings
         self.audioSink = audioSink
+        changeDetector = speakerChanges
+        lexicon = settings.termLexicon
         var config = segmentation
         config.silenceMs = settings.silenceMs
         config.maxUtteranceMs = max(5, settings.maxUtteranceSeconds) * 1000
@@ -83,38 +99,35 @@ public actor TranscriptionSession {
         do {
             let set = try await provider.makeEngines(for: settings)
             created = set
-            try await set.streaming.prepare()
-            try await set.corrector?.prepare()
+            // All models load at once: the slowest (an LLM corrector, ~2 s) sets the wait,
+            // not their sum (~3.5 s with X-ASR + Fun-ASR-Nano).
+            let expected = settings.expectedSpeakers
+            async let streamingError = Self.attempt { try await set.streaming.prepare() }
+            async let correctorError = Self.attempt { try await set.corrector?.prepare() }
+            async let fallbackError = Self.attempt { try await set.fallbackCorrector?.prepare() }
+            async let labelerError = Self.attempt { try await set.speakerLabeler?.prepare(expectedSpeakers: expected) }
+            async let translatorError = Self.attempt { try await set.translator?.prepare() }
+            async let voiceError = Self.attempt { try await set.voiceDetector?.prepare() }
+            let failures = await (streamingError, correctorError, fallbackError, labelerError, translatorError, voiceError)
+            if let error = failures.0 ?? failures.1 { throw error }
 
             var fallback = set.fallbackCorrector
-            if let candidate = fallback {
-                do {
-                    try await candidate.prepare()
-                } catch {
-                    fallback = nil
-                    notice("本机备用纠错不可用：\(error.localizedDescription)")
-                }
+            if let error = failures.2 {
+                fallback = nil
+                notice("本机备用纠错不可用：\(error.localizedDescription)")
             }
-
             var labeler = set.speakerLabeler
-            if let candidate = labeler {
-                do {
-                    try await candidate.prepare(expectedSpeakers: settings.expectedSpeakers)
-                } catch {
-                    labeler = nil
-                    notice("说话人标注不可用：\(error.localizedDescription)")
-                }
+            if let error = failures.3 {
+                labeler = nil
+                notice("说话人标注不可用：\(error.localizedDescription)")
             }
-
             var translator = set.translator
-            if let candidate = translator {
-                do {
-                    try await candidate.prepare()
-                } catch {
-                    translator = nil
-                    notice("实时翻译不可用：\(error.localizedDescription)")
-                }
+            if let error = failures.4 {
+                translator = nil
+                notice("实时翻译不可用：\(error.localizedDescription)")
             }
+            // Without it the energy VAD still segments, as before.
+            let voiceDetector = failures.5 == nil ? set.voiceDetector : nil
 
             guard phase == .preparing else { throw CancellationError() }
 
@@ -123,9 +136,11 @@ public actor TranscriptionSession {
                 corrector: set.corrector,
                 fallbackCorrector: fallback,
                 speakerLabeler: labeler,
-                translator: translator
+                translator: translator,
+                voiceDetector: voiceDetector
             )
             engines = ready
+            if voiceDetector != nil { segmenter.useVoiceModel() }
             startWorkers()
             eventSink.yield(.engines(EngineInfo(
                 streaming: ready.streaming.providerID,
@@ -147,10 +162,38 @@ public actor TranscriptionSession {
         }
     }
 
+    private static func attempt(_ prepare: @Sendable () async throws -> Void) async -> Error? {
+        do {
+            try await prepare()
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// Recording starts before the models are ready: audio from that time waits here and is
+    /// recognized first once they are, so nothing said right after pressing record is lost.
     public func ingest(_ samples: [Float]) async {
+        if phase == .preparing {
+            if waiting.count < Self.maxWaitingSamples { waiting += samples }
+            return
+        }
+        guard phase == .listening, engines != nil, !samples.isEmpty else { return }
+        if !waiting.isEmpty {
+            let backlog = waiting
+            waiting = []
+            for start in stride(from: 0, to: backlog.count, by: 1600) {
+                await ingestChunk(Array(backlog[start..<min(start + 1600, backlog.count)]))
+            }
+        }
+        await ingestChunk(samples)
+    }
+
+    private func ingestChunk(_ samples: [Float]) async {
         guard phase == .listening, let engines, !samples.isEmpty else { return }
         audioSink?.append(samples)
-        let closedByVAD = segmenter.push(samples)
+        let voice = await engines.voiceDetector?.detect(samples) ?? []
+        let closedByVAD = segmenter.push(samples, voice: voice)
 
         let update: StreamingUpdate
         do {
@@ -170,6 +213,10 @@ public actor TranscriptionSession {
         guard phase == .listening else { return }
 
         updatePartial(update.text)
+        if let segment = await speakerChange() {
+            await closeSentence(segment)
+            return
+        }
         if open == nil && !segmenter.hasSpeech {
             // Neither the VAD nor the recognizer hears anyone: drop old leading silence,
             // keeping enough to cover the recognizer's latency.
@@ -185,6 +232,7 @@ public actor TranscriptionSession {
             } else if !segmenter.hasSpeech {
                 // Silence-only endpoint (sherpa rule 1): just restart the decoder.
                 _ = await engines.streaming.finishUtterance()
+                streamStart = segmenter.position
             }
             // Otherwise someone is talking and the decoder hasn't caught up yet: never chop
             // a sentence that just started (its delayed silence endpoint lands here).
@@ -253,12 +301,13 @@ public actor TranscriptionSession {
         await set.fallbackCorrector?.shutdown()
         await set.speakerLabeler?.shutdown()
         await set.translator?.shutdown()
+        await set.voiceDetector?.shutdown()
     }
 
     // MARK: - Sentences
 
     private func updatePartial(_ text: String) {
-        let trimmed = TextFilter.normalizeCase(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmed = lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(text.trimmingCharacters(in: .whitespacesAndNewlines))))
         guard let engines else { return }
         if var current = open {
             guard current.partial != trimmed else { return }
@@ -279,16 +328,62 @@ public actor TranscriptionSession {
         }
     }
 
+    /// Checks the open sentence, one window per hop, for another voice taking over without a
+    /// pause; returns its first part, cut where the change happened.
+    private func speakerChange() async -> Segment? {
+        guard var detector = changeDetector, let labeler = engines?.speakerLabeler, segmenter.hasSpeech,
+              let speechStart = segmenter.openSpeechStart
+        else { return nil }
+        let window = AudioSpec.samples(forMilliseconds: detector.windowMs)
+        if changeSentence != speechStart {
+            changeSentence = speechStart
+            detector.start(at: speechStart)
+            nextChangeWindowEnd = speechStart + window
+        }
+        defer { changeDetector = detector }
+        guard segmenter.position >= nextChangeWindowEnd else { return nil }
+        let windowStart = nextChangeWindowEnd - window
+        nextChangeWindowEnd += AudioSpec.samples(forMilliseconds: detector.hopMs)
+        let clip = segmenter.samples(from: windowStart).prefix(window)
+        guard clip.count == window, let embedding = await labeler.embed(Array(clip)) else { return nil }
+        // The actor may have run other work during the await; the window still belongs to this sentence.
+        guard changeSentence == segmenter.openSpeechStart,
+              let boundary = detector.observe(embedding, windowStart: windowStart)
+        else { return nil }
+        return segmenter.cutForSpeakerChange(near: boundary)
+    }
+
     private func closeSentence(_ segment: Segment?) async {
         guard let engines, jobs != nil else { return }
-        let finished = await engines.streaming.finishUtterance()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        var utterance = open ?? Utterance(startMs: 0, provider: engines.streaming.providerID)
+        // A length or speaker cut lies in the past: the recognizer has already heard the start
+        // of the next sentence. Keep only the text before the cut (token times lag the audio a
+        // little) and feed the rest of the audio again for the next sentence.
+        let pastCut = segment.map { $0.reason == .maxLength || $0.reason == .speakerChange } ?? false
+        let finished: String
+        if pastCut, let segment {
+            let seconds = Double(segment.endSample - streamStart) / Double(AudioSpec.sampleRate) + 0.15
+            finished = await engines.streaming.finishUtterance(keepingUntil: seconds)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            streamStart = segment.endSample
+        } else {
+            finished = await engines.streaming.finishUtterance()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            streamStart = segmenter.position
+        }
+        queue(segment, finished: finished, provider: engines.streaming.providerID)
+        if pastCut, let segment {
+            await refeed(after: segment.endSample)
+        }
+    }
+
+    /// Turns the open sentence into a correction job (or drops it when nothing was said).
+    private func queue(_ segment: Segment?, finished: String, provider: String) {
+        var utterance = open ?? Utterance(startMs: 0, provider: provider)
         let wasEmitted = openEmitted
         open = nil
         openEmitted = false
 
-        let hint = finished.isEmpty ? utterance.partial : TextFilter.normalizeCase(finished)
+        let hint = finished.isEmpty ? utterance.partial : lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(finished)))
         guard let segment,
               TextFilter.isMeaningful(hint)
                 || segment.speechMs >= segmenter.config.minSpeechMs
@@ -309,6 +404,14 @@ public actor TranscriptionSession {
         let from = min(segment.samples.count, max(0, segment.speechStartSample - segment.startSample - pad))
         let to = max(from, min(segment.samples.count, segment.speechEndSample - segment.startSample + pad))
         jobs?.yield(CorrectionJob(id: utterance.id, samples: segment.samples, hint: hint, speechMs: segment.speechMs, voiced: from..<to))
+    }
+
+    /// The audio after a cut in the past, decoded again as the start of the next sentence.
+    private func refeed(after cut: Int) async {
+        guard phase == .listening || phase == .paused, let engines else { return }
+        let rest = segmenter.samples(from: cut)
+        guard !rest.isEmpty, let update = try? await engines.streaming.accept(rest) else { return }
+        updatePartial(update.text)
     }
 
     // MARK: - Correction worker
@@ -370,7 +473,9 @@ public actor TranscriptionSession {
                 }
             }
         }
-        text = TextFilter.normalizeCase(TextFilter.normalizePunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        text = lexicon.correct(TextFilter.tightenChineseSpacing(
+            TextFilter.normalizeCase(TextFilter.normalizePunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        ))
         let heard = failure == nil ? TextFilter.isMeaningful(text) : TextFilter.isMeaningful(job.hint)
 
         // Only real speech is clustered: a click that recognizes as nothing must not

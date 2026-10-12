@@ -243,4 +243,46 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(Double(sentence.endMs ?? 0), 4500, accuracy: 40)
         XCTAssertEqual(corrector.calls, 1)
     }
+
+    /// Two people talking back to back without a pause: the sentence is cut where the second
+    /// voice takes over, and each part gets its own speaker.
+    func testSpeakerChangeWithoutAPauseSplitsTheSentence() async throws {
+        let session = TranscriptionSession(
+            provider: StaticProvider(set: EngineSet(
+                streaming: ScriptedStreaming(), corrector: ScriptedCorrector(),
+                speakerLabeler: PitchSpeakerLabeler(), voiceDetector: LevelVoiceDetector()
+            )),
+            settings: AppSettings()
+        )
+        try await session.start()
+        await session.feed(Signal.silence(ms: 500) + Signal.tone(ms: 4_000) + Signal.tone(ms: 4_000, frequency: 440)
+                           + Signal.silence(ms: 1_500), chunk: 1600)
+        let result = await session.stop()
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result.map(\.speakerIndex), [0, 1])
+        XCTAssertEqual(Double(result[0].endMs ?? 0), 4_500, accuracy: 400)
+        XCTAssertEqual(Double(result[1].startMs), 4_500, accuracy: 400)
+        XCTAssertTrue(result.allSatisfy { !$0.partial.isEmpty }, "the second part's live text comes from the audio fed again")
+    }
+
+    /// Recording starts before the models are ready: speech from that time is still recognized.
+    func testAudioIngestedWhileEnginesLoadIsKept() async throws {
+        let streaming = ScriptedStreaming()
+        streaming.prepareDelayNanos = 300_000_000
+        let session = TranscriptionSession(
+            provider: StaticProvider(set: EngineSet(streaming: streaming, corrector: ScriptedCorrector())),
+            settings: AppSettings()
+        )
+        let starting = Task { try await session.start() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let phase = await session.currentPhase
+        XCTAssertEqual(phase, .preparing)
+        await session.feed(Signal.silence(ms: 500) + Signal.speech(ms: 1_500))
+        try await starting.value
+        await session.feed(Signal.silence(ms: 1_500))
+        let result = await session.stop()
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(Double(result.first?.startMs ?? 0), 500, accuracy: 60)
+        XCTAssertEqual(Double(result.first?.endMs ?? 0), 2_000, accuracy: 60)
+    }
 }

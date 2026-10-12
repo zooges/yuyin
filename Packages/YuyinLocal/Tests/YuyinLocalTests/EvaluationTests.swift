@@ -389,7 +389,9 @@ extension EvaluationTests {
     /// | firered | funasr | qwen3 | none). Models come from the app directory or YUYIN_EVAL_MODELS.
     func testSessionReplayWithCorrector() async throws {
         let audio = try WAVFile.read(try XCTUnwrap(wav))
-        let name = ProcessInfo.processInfo.environment["YUYIN_EVAL_CORRECTOR"] ?? "paraformer"
+        let env = ProcessInfo.processInfo.environment
+        let name = env["YUYIN_EVAL_CORRECTOR"] ?? "paraformer"
+        let hotwords = env["YUYIN_EVAL_HOTWORDS"].map { (try? String(contentsOfFile: $0, encoding: .utf8)) ?? $0 } ?? ""
         let std = ModelLocator.standard
         func files(_ kind: ModelKind, _ prefix: String) throws -> OfflineModelFiles {
             if std.isInstalled(kind) { return try std.offlineFiles(kind) }
@@ -405,11 +407,14 @@ extension EvaluationTests {
                                                               punctuationModel: try? std.singleModel(.punctuation))
         case "firered": corrector = SherpaOfflineCorrector(kind: .fireRed, files: try files(.fireRed, "sherpa-onnx-fire-red-asr"),
                                                            punctuationModel: try? std.singleModel(.punctuation))
-        case "funasr": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"))
+        case "funasr": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"), hotwords: hotwords)
         case "funasr-zh": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"),
-                                                             promptLanguage: "中文")
-        case "qwen3": corrector = SherpaOfflineCorrector(kind: .qwen3, files: try files(.qwen3ASR, "sherpa-onnx-qwen3-asr"))
-        case "production": corrector = try LocalEngines().makeCorrector(try LocalEngines().resolveCorrector(.auto))
+                                                             hotwords: hotwords, promptLanguage: "中文")
+        case "qwen3": corrector = SherpaOfflineCorrector(kind: .qwen3, files: try files(.qwen3ASR, "sherpa-onnx-qwen3-asr"), hotwords: hotwords)
+        case "production", "qwen-large":
+            var local = LocalEngines()
+            local.background = env["YUYIN_EVAL_CONTEXT"] == "0" ? nil : AppSettings().recognitionBackground
+            corrector = try local.makeCorrector(try local.resolveCorrector(name == "production" ? .auto : .qwen3ASRLarge))
         default: corrector = nil
         }
         struct Provider: EngineProvider {
@@ -418,7 +423,6 @@ extension EvaluationTests {
         }
         let engines = LocalEngines()
         var settings = AppSettings()
-        let env = ProcessInfo.processInfo.environment
         if let ms = env["YUYIN_EVAL_SILENCE"].flatMap(Int.init) { settings.silenceMs = ms }
         var segmentation = SegmenterConfig()
         if let ms = env["YUYIN_EVAL_ENDPOINT_SILENCE"].flatMap(Int.init) { segmentation.endpointSilenceMs = ms }
@@ -433,8 +437,13 @@ extension EvaluationTests {
             if let t = env["YUYIN_EVAL_SHORT_CLIP"].flatMap(Float.init) { clusterer.shortClipThreshold = t }
             labeler = SherpaSpeakerLabeler(model: try env["YUYIN_EVAL_SPEAKER_MODEL"] ?? std.singleModel(.speakerEmbedding), clusterer: clusterer)
         }
+        // YUYIN_EVAL_STREAMING=<model dir>: another streaming model; YUYIN_EVAL_VAD=energy: the old segmentation.
+        let streaming = try env["YUYIN_EVAL_STREAMING"].map { SherpaStreamingEngine(files: try std.streamingFiles(in: URL(fileURLWithPath: $0))) }
+            ?? engines.makeStreaming(engines.resolveStreaming(.auto))
+        let voice = env["YUYIN_EVAL_VAD"] == "energy" ? nil : engines.makeVoiceDetector()
+        let timed = corrector.map(TimedCorrector.init)
         let session = TranscriptionSession(
-            provider: Provider(set: EngineSet(streaming: try engines.makeStreaming(.sherpa), corrector: corrector, speakerLabeler: labeler)),
+            provider: Provider(set: EngineSet(streaming: streaming, corrector: timed, speakerLabeler: labeler, voiceDetector: voice)),
             settings: settings,
             segmentation: segmentation
         )
@@ -444,8 +453,13 @@ extension EvaluationTests {
             await session.ingest(Array(audio[start..<min(start + 1600, audio.count)]))
         }
         let result = await session.stop()
-        print(String(format: "CORRECTOR %@ silence %dms: %d sentences (%.1fs for %.1fs audio)",
-                     name, settings.silenceMs, result.count, Date().timeIntervalSince(t0), Double(audio.count) / 16000))
+        print(String(format: "CORRECTOR %@ VAD %@ silence %dms: %d sentences (%.1fs for %.1fs audio)",
+                     name, voice == nil ? "energy" : "silero", settings.silenceMs, result.count,
+                     Date().timeIntervalSince(t0), Double(audio.count) / 16000))
+        if let timed { print(timed.summary) }
+        if let out = env["YUYIN_EVAL_OUT"] {
+            try JSONEncoder().encode(result).write(to: URL(fileURLWithPath: out))
+        }
         var previousEnd: Int?
         for u in result {
             // Pause before this sentence: short pauses at a split usually mean a sentence cut in two.
@@ -624,9 +638,10 @@ extension EvaluationTests {
         }
         let engines = LocalEngines()
         let session = TranscriptionSession(
-            provider: Provider(set: EngineSet(streaming: try engines.makeStreaming(.sherpa), corrector: nil,
-                                              speakerLabeler: SherpaSpeakerLabeler(model: model, clusterer: clusterer))),
-            settings: settings, segmentation: segmentation
+            provider: Provider(set: EngineSet(streaming: try engines.makeStreaming(engines.resolveStreaming(.auto)), corrector: nil,
+                                              speakerLabeler: SherpaSpeakerLabeler(model: model, clusterer: clusterer),
+                                              voiceDetector: env["YUYIN_EVAL_VAD"] == "energy" ? nil : engines.makeVoiceDetector())),
+            settings: settings, segmentation: segmentation, speakerChanges: Self.speakerChanges(env)
         )
         try await session.start()
         for start in stride(from: 0, to: audio.count, by: 1600) {
@@ -634,7 +649,7 @@ extension EvaluationTests {
         }
         let utterances = await session.stop()
         let name = URL(fileURLWithPath: model).deletingPathExtension().lastPathComponent
-        print("REPLAY \(name) threshold \(clusterer.threshold) short \(segmentation.shortSentenceMs)/\(segmentation.shortSentenceSilenceMs) silence \(settings.silenceMs)")
+        print("REPLAY \(name) VAD \(env["YUYIN_EVAL_VAD"] ?? "silero") change \(env["YUYIN_EVAL_CHANGE"] ?? "0.5") threshold \(clusterer.threshold) short \(segmentation.shortSentenceMs)/\(segmentation.shortSentenceSilenceMs) silence \(settings.silenceMs)")
         Self.scoreSpeakers(utterances.map { ($0.startMs, $0.endMs ?? $0.startMs, $0.speakerIndex) }, reference: reference, label: "live")
 
         if env["YUYIN_EVAL_DIARIZE"] == "1" {
@@ -650,6 +665,15 @@ extension EvaluationTests {
                 await diarizer.shutdown()
             }
         }
+    }
+
+    /// YUYIN_EVAL_CHANGE=off | <similarity>: speaker changes inside a sentence.
+    static func speakerChanges(_ env: [String: String]) -> SpeakerChangeDetector? {
+        guard let value = env["YUYIN_EVAL_CHANGE"] else { return SpeakerChangeDetector() }
+        guard let threshold = Float(value) else { return nil }
+        var detector = SpeakerChangeDetector()
+        detector.threshold = threshold
+        return detector
     }
 
     /// Per sentence: its main reference speaker (by overlap); "mixed" when that speaker covers
@@ -724,7 +748,7 @@ extension EvaluationTests {
             func makeEngines(for settings: AppSettings) async throws -> EngineSet { set }
         }
         let session = TranscriptionSession(
-            provider: Provider(set: EngineSet(streaming: try LocalEngines().makeStreaming(.sherpa), corrector: nil)),
+            provider: Provider(set: EngineSet(streaming: try LocalEngines().makeStreaming(LocalEngines().resolveStreaming(.auto)), corrector: nil)),
             settings: settings, segmentation: segmentation
         )
         try await session.start()
@@ -844,6 +868,111 @@ extension EvaluationTests {
 }
 
 extension EvaluationTests {
+    /// Speaker changes inside a sentence, found by sliding-window embeddings: a window that no
+    /// longer sounds like the sentence so far (twice in a row) starts a new piece. Pieces are then
+    /// labeled with the production clusterer and scored against the RTTM.
+    ///
+    ///     YUYIN_EVAL_WAV=… YUYIN_EVAL_RTTM=… [YUYIN_EVAL_LIMIT_SEC=900] [YUYIN_EVAL_VAD=energy]
+    ///     [YUYIN_EVAL_CHANGE_THRESHOLDS=0.2,0.3,0.4] [YUYIN_EVAL_CHANGE_WIN=1500] [YUYIN_EVAL_CHANGE_HOP=500]
+    ///     [YUYIN_EVAL_CHANGE_CONFIRM=2] [YUYIN_EVAL_SPLIT_MIN=1500]
+    func testSpeakerChangeLab() async throws {
+        let env = ProcessInfo.processInfo.environment
+        var audio = try WAVFile.read(try XCTUnwrap(wav))
+        if let limit = env["YUYIN_EVAL_LIMIT_SEC"].flatMap(Double.init) { audio = Array(audio.prefix(Int(limit * 16000))) }
+        let duration = Double(audio.count) / 16000
+        let reference: [(start: Double, end: Double, speaker: String)] = try String(contentsOfFile: try XCTUnwrap(env["YUYIN_EVAL_RTTM"]), encoding: .utf8)
+            .split(separator: "\n").compactMap { line in
+                let f = line.split(separator: " ")
+                guard f.count > 7, let s = Double(f[3]), let d = Double(f[4]), s < duration else { return nil }
+                return (s, min(s + d, duration), String(f[7]))
+            }
+        struct Provider: EngineProvider {
+            let set: EngineSet
+            func makeEngines(for settings: AppSettings) async throws -> EngineSet { set }
+        }
+        let engines = LocalEngines()
+        let session = TranscriptionSession(
+            provider: Provider(set: EngineSet(streaming: try engines.makeStreaming(engines.resolveStreaming(.auto)), corrector: nil,
+                                              voiceDetector: env["YUYIN_EVAL_VAD"] == "energy" ? nil : engines.makeVoiceDetector())),
+            settings: AppSettings()
+        )
+        try await session.start()
+        for start in stride(from: 0, to: audio.count, by: 1600) {
+            await session.ingest(Array(audio[start..<min(start + 1600, audio.count)]))
+        }
+        let spans = await session.stop().sorted { $0.startMs < $1.startMs }.map { ($0.startMs, $0.endMs ?? $0.startMs) }
+
+        var config = sherpaOnnxSpeakerEmbeddingExtractorConfig(model: try ModelLocator.standard.singleModel(.speakerEmbedding), numThreads: 4)
+        let extractor = SherpaOnnxSpeakerEmbeddingExtractorWrapper(config: &config)
+        func embed(_ fromMs: Int, _ toMs: Int) -> [Float]? {
+            let a = max(0, fromMs * 16), b = min(audio.count, toMs * 16)
+            guard b - a >= 4000 else { return nil }
+            let stream = extractor.createStream()
+            stream.acceptWaveform(samples: Array(audio[a..<b]), sampleRate: 16000)
+            stream.inputFinished()
+            guard extractor.isReady(stream: stream) else { return nil }
+            let e = extractor.compute(stream: stream)
+            let n = e.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            return n > 0 ? e.map { $0 / n } : nil
+        }
+        func cosine(_ a: [Float], _ b: [Float]) -> Float {
+            let n = a.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            return n > 0 ? zip(a, b).reduce(0) { $0 + $1.0 * $1.1 } / n : 0
+        }
+        let win = env["YUYIN_EVAL_CHANGE_WIN"].flatMap(Int.init) ?? 1500
+        let hop = env["YUYIN_EVAL_CHANGE_HOP"].flatMap(Int.init) ?? 500
+        let confirm = env["YUYIN_EVAL_CHANGE_CONFIRM"].flatMap(Int.init) ?? 2
+        let minPiece = env["YUYIN_EVAL_SPLIT_MIN"].flatMap(Int.init) ?? 1500
+        // Window embeddings, computed once per sentence.
+        let windows: [[(start: Int, emb: [Float])]] = spans.map { a, b in
+            guard b - a >= 2 * minPiece else { return [] }
+            return stride(from: a, through: b - win, by: hop).compactMap { t in embed(t, t + win).map { (t, $0) } }
+        }
+
+        func label(_ pieces: [(Int, Int)], _ name: String) {
+            var clusterer = OnlineSpeakerClusterer()
+            let labels = pieces.map { a, b in embed(a - 100, b + 100).flatMap { clusterer.assign($0, speechMs: b - a) } }
+            Self.scoreSpeakers(zip(pieces, labels).map { ($0.0, $0.1, $1) }, reference: reference, label: name)
+        }
+        print(String(format: "CHANGE LAB %.0fs VAD %@: %d sentences", duration, env["YUYIN_EVAL_VAD"] ?? "silero", spans.count))
+        label(spans, "no split")
+        let thresholds = env["YUYIN_EVAL_CHANGE_THRESHOLDS"].map { $0.split(separator: ",").compactMap { Float(String($0)) } } ?? [0.2, 0.3, 0.4]
+        for tau in thresholds {
+            var pieces: [(Int, Int)] = []
+            for (i, (a, b)) in spans.enumerated() {
+                var pieceStart = a
+                var profile: [Float]?
+                var firstBelow: Int?
+                var below = 0
+                for w in windows[i] {
+                    guard let p = profile else { profile = w.emb; continue }
+                    if cosine(p, w.emb) < tau {
+                        below += 1
+                        firstBelow = firstBelow ?? w.start
+                        if below >= confirm, let changed = firstBelow {
+                            let boundary = changed + win / 2
+                            if boundary - pieceStart >= minPiece && b - boundary >= minPiece {
+                                pieces.append((pieceStart, boundary))
+                                pieceStart = boundary
+                                profile = w.emb
+                            }
+                            below = 0
+                            firstBelow = nil
+                        }
+                    } else {
+                        below = 0
+                        firstBelow = nil
+                        profile = zip(p, w.emb).map { $0 + $1 }
+                    }
+                }
+                pieces.append((pieceStart, b))
+            }
+            label(pieces, String(format: "split τ %.2f (%d pieces)", tau, pieces.count))
+        }
+    }
+}
+
+extension EvaluationTests {
     /// "重新分析说话人" on a saved recording (YUYIN_EVAL_MEETING=<meeting folder>), as the app does it.
     func testReanalyzeMeeting() async throws {
         let dir = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["YUYIN_EVAL_MEETING"]))
@@ -859,5 +988,284 @@ extension EvaluationTests {
                          u.speakerIndex.map { "S\($0 + 1)" } ?? "-", String(u.displayText.prefix(50))))
         }
         await labeler.shutdown()
+    }
+}
+
+/// Per-sentence correction time, to see whether a corrector keeps up with speech.
+final class TimedCorrector: CorrectorASREngine, @unchecked Sendable {
+    private let inner: any CorrectorASREngine
+    private var runs: [(audio: Double, wall: Double)] = []
+    var providerID: String { inner.providerID }
+
+    init(_ inner: any CorrectorASREngine) {
+        self.inner = inner
+    }
+
+    func prepare() async throws { try await inner.prepare() }
+
+    func correct(_ samples: [Float], hint: String) async throws -> String {
+        let start = Date()
+        defer { runs.append((Double(samples.count) / Double(AudioSpec.sampleRate), Date().timeIntervalSince(start))) }
+        return try await inner.correct(samples, hint: hint)
+    }
+
+    func shutdown() async { await inner.shutdown() }
+
+    var summary: String {
+        let walls = runs.map(\.wall).sorted()
+        guard !walls.isEmpty else { return "TIMING no sentences" }
+        let audio = runs.map(\.audio).reduce(0, +)
+        return String(format: "TIMING %d sentences: mean %.2fs, p90 %.2fs, max %.2fs per sentence; RTF %.3f",
+                      walls.count, walls.reduce(0, +) / Double(walls.count), walls[walls.count * 9 / 10],
+                      walls.last!, walls.reduce(0, +) / audio)
+    }
+}
+
+extension EvaluationTests {
+    /// `finishUtterance(keepingUntil:)` assumes token times restart at 0 after a reset.
+    func testStreamingTimestampsRestartAfterReset() throws {
+        let audio = try WAVFile.read(try XCTUnwrap(wav))
+        let locator = ModelLocator.standard
+        let dir = locator.directory(for: locator.isInstalled(.streamingXASR) ? .streamingXASR : .streamingZipformer)
+        let files = try locator.streamingFiles(in: dir)
+        let modelConfig = sherpaOnnxOnlineModelConfig(
+            tokens: files.tokens,
+            transducer: sherpaOnnxOnlineTransducerModelConfig(encoder: files.encoder, decoder: files.decoder, joiner: files.joiner),
+            numThreads: 2, modelType: ""
+        )
+        var config = sherpaOnnxOnlineRecognizerConfig(
+            featConfig: sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80), modelConfig: modelConfig, enableEndpoint: false
+        )
+        let recognizer = SherpaOnnxRecognizer(config: &config)
+        for (i, range) in [0..<96_000, 96_000..<192_000].enumerated() {
+            recognizer.acceptWaveform(samples: Array(audio[range]), sampleRate: 16000)
+            while recognizer.isReady() { recognizer.decode() }
+            let r = recognizer.getResult()
+            print("PART \(i): \(r.tokens.count) tokens, times \(r.timestamps.first ?? -1)…\(r.timestamps.last ?? -1): \(r.text)")
+            recognizer.reset()
+        }
+    }
+}
+
+extension EvaluationTests {
+    /// Every change the legal term correction makes to a saved recording (YUYIN_EVAL_MEETING=<folder>).
+    func testTermLexiconOnMeeting() throws {
+        let dir = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["YUYIN_EVAL_MEETING"]))
+        let meeting = try JSONDecoder().decode(Meeting.self, from: Data(contentsOf: dir.appendingPathComponent("meeting.json")))
+        let vocabulary = AppSettings.parseVocabulary(ProcessInfo.processInfo.environment["YUYIN_EVAL_VOCAB"] ?? "")
+        let lexicon = AppSettings(vocabulary: vocabulary).termLexicon
+        var lines: [String] = []
+        for u in meeting.utterances {
+            let before = u.displayText, after = lexicon.correct(before)
+            guard before != after else { continue }
+            lines.append("TERM \(before)\n  →  \(after)")
+        }
+        lines.append("TERMS changed \(lines.count) of \(meeting.utterances.count) sentences")
+        // stdout of long test runs gets cut off; YUYIN_EVAL_OUT keeps the full list.
+        if let out = ProcessInfo.processInfo.environment["YUYIN_EVAL_OUT"] {
+            try lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
+        }
+        lines.forEach { print($0) }
+    }
+}
+
+extension EvaluationTests {
+    /// Pauses the voice model hears in a recording, by length (YUYIN_EVAL_VAD_THRESHOLDS=0.5,0.6).
+    func testVoiceModelPauses() async throws {
+        let audio = try WAVFile.read(try XCTUnwrap(wav))
+        let thresholds = ProcessInfo.processInfo.environment["YUYIN_EVAL_VAD_THRESHOLDS"]?.split(separator: ",").compactMap { Float(String($0)) } ?? [0.5]
+        for threshold in thresholds {
+            let vad = SherpaVoiceDetector(model: try XCTUnwrap(SherpaVoiceDetector.bundledModel), threshold: threshold)
+            try await vad.prepare()
+            var decisions: [VoiceDecision] = []
+            for start in stride(from: 0, to: audio.count, by: 1600) {
+                decisions += await vad.detect(Array(audio[start..<min(start + 1600, audio.count)]))
+            }
+            var pauses: [Int] = [], run = 0, speech = 0
+            for d in decisions {
+                if d.isSpeech { if run > 0 { pauses.append(run) }; run = 0; speech += 512 } else { run += 512 }
+            }
+            let ms = pauses.map { $0 / 16 }
+            let buckets = [100, 150, 250, 450, 700, 1300]
+            let counts = buckets.map { b in ms.filter { $0 >= b }.count }
+            print(String(format: "VAD %.2f: speech %.0f%%, pauses ≥", threshold, 100 * Double(speech) / Double(audio.count))
+                  + zip(buckets, counts).map { " \($0)ms:\($1)" }.joined())
+        }
+    }
+}
+
+extension EvaluationTests {
+    /// How far live recognition falls behind, fed at real-time pace (YUYIN_EVAL_FAST=1: as fast
+    /// as possible) with the production engines. Times every engine call that `ingest` waits for.
+    func testIngestLatency() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let audio = try WAVFile.read(try XCTUnwrap(wav))
+        let engines = LocalEngines()
+        let clock = CallClock()
+        let streaming = TimedStreaming(try engines.makeStreaming(engines.resolveStreaming(.auto)), clock)
+        let labeler = env["YUYIN_EVAL_LABEL"] == "0" ? nil : engines.makeSpeakerLabeler().map { TimedLabeler($0, clock) }
+        let voice = env["YUYIN_EVAL_VAD"] == "energy" ? nil : engines.makeVoiceDetector().map { TimedVoice($0, clock) }
+        let corrector = env["YUYIN_EVAL_CORRECTOR"] == "none" ? nil : try engines.makeCorrector(engines.resolveCorrector(.auto))
+        let session = TranscriptionSession(
+            provider: StaticEngines(set: EngineSet(streaming: streaming, corrector: corrector, speakerLabeler: labeler, voiceDetector: voice)),
+            settings: AppSettings(), speakerChanges: Self.speakerChanges(env)
+        )
+        try await session.start()
+        let chunk = 1600
+        let realtime = env["YUYIN_EVAL_FAST"] != "1"
+        let t0 = Date()
+        var lags: [Double] = []
+        var worst: (lag: Double, at: Double) = (0, 0)
+        for start in stride(from: 0, to: audio.count, by: chunk) {
+            let end = min(start + chunk, audio.count)
+            let audioTime = Double(end) / 16000
+            if realtime {
+                let wait = audioTime - Date().timeIntervalSince(t0)
+                if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1e9)) }
+            }
+            await session.ingest(Array(audio[start..<end]))
+            let lag = Date().timeIntervalSince(t0) - audioTime
+            lags.append(lag)
+            if lag > worst.lag { worst = (lag, audioTime) }
+        }
+        let wall = Date().timeIntervalSince(t0)
+        _ = await session.stop()
+        let sorted = lags.sorted()
+        print(String(format: "LATENCY %@ %.0fs audio in %.1fs: lag median %.2fs p90 %.2fs max %.2fs (at %.0fs), final lag %.2fs",
+                     realtime ? "realtime" : "fast", Double(audio.count) / 16000, wall,
+                     sorted[sorted.count / 2], sorted[sorted.count * 9 / 10], worst.lag, worst.at, lags.last ?? 0))
+        print(clock.report)
+    }
+}
+
+private struct StaticEngines: EngineProvider {
+    let set: EngineSet
+    func makeEngines(for settings: AppSettings) async throws -> EngineSet { set }
+}
+
+/// Total / max time per engine call.
+final class CallClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stats: [String: (count: Int, total: Double, max: Double)] = [:]
+
+    func time<T>(_ name: String, _ body: () async throws -> T) async rethrows -> T {
+        let start = Date()
+        defer {
+            let elapsed = Date().timeIntervalSince(start)
+            lock.withLock {
+                var s = stats[name] ?? (0, 0, 0)
+                s.count += 1; s.total += elapsed; s.max = max(s.max, elapsed)
+                stats[name] = s
+            }
+        }
+        return try await body()
+    }
+
+    var report: String {
+        lock.withLock {
+            stats.sorted { $0.value.total > $1.value.total }.map {
+                String(format: "  %-22@ %5d calls, total %6.2fs, mean %5.1fms, max %6.1fms", $0.key as NSString, $0.value.count,
+                       $0.value.total, 1000 * $0.value.total / Double($0.value.count), 1000 * $0.value.max)
+            }.joined(separator: "\n")
+        }
+    }
+}
+
+final class TimedStreaming: StreamingASREngine, @unchecked Sendable {
+    private let inner: any StreamingASREngine
+    private let clock: CallClock
+    var providerID: String { inner.providerID }
+    init(_ inner: any StreamingASREngine, _ clock: CallClock) { self.inner = inner; self.clock = clock }
+    func prepare() async throws { try await inner.prepare() }
+    func accept(_ samples: [Float]) async throws -> StreamingUpdate {
+        try await clock.time(samples.count > 1600 ? "streaming.refeed" : "streaming.accept") { try await inner.accept(samples) }
+    }
+    func finishUtterance() async -> String { await clock.time("streaming.finish") { await inner.finishUtterance() } }
+    func finishUtterance(keepingUntil seconds: Double) async -> String {
+        await clock.time("streaming.finish") { await inner.finishUtterance(keepingUntil: seconds) }
+    }
+    func shutdown() async { await inner.shutdown() }
+}
+
+final class TimedLabeler: SpeakerLabeling, @unchecked Sendable {
+    private let inner: any SpeakerLabeling
+    private let clock: CallClock
+    init(_ inner: any SpeakerLabeling, _ clock: CallClock) { self.inner = inner; self.clock = clock }
+    func prepare(expectedSpeakers: Int) async throws { try await inner.prepare(expectedSpeakers: expectedSpeakers) }
+    func assign(_ samples: [Float], speechMs: Int) async throws -> Int? {
+        try await clock.time("labeler.assign (worker)") { try await inner.assign(samples, speechMs: speechMs) }
+    }
+    func embed(_ samples: [Float]) async -> [Float]? { await clock.time("labeler.embed") { await inner.embed(samples) } }
+    func shutdown() async { await inner.shutdown() }
+}
+
+final class TimedVoice: VoiceActivityDetecting, @unchecked Sendable {
+    private let inner: any VoiceActivityDetecting
+    private let clock: CallClock
+    init(_ inner: any VoiceActivityDetecting, _ clock: CallClock) { self.inner = inner; self.clock = clock }
+    func prepare() async throws { try await inner.prepare() }
+    func detect(_ samples: [Float]) async -> [VoiceDecision] { await clock.time("vad.detect") { await inner.detect(samples) } }
+    func shutdown() async { await inner.shutdown() }
+}
+
+extension EvaluationTests {
+    /// How long after a word is spoken it appears in the live text: per token, the audio position
+    /// when it was first decoded minus its own time. YUYIN_EVAL_STREAMING_DIRS=<dir,dir…>.
+    func testStreamingEmissionDelay() throws {
+        let env = ProcessInfo.processInfo.environment
+        let audio = Array(try WAVFile.read(try XCTUnwrap(wav)).prefix(16000 * 90))
+        let dirs = try XCTUnwrap(env["YUYIN_EVAL_STREAMING_DIRS"]).split(separator: ",").map { URL(fileURLWithPath: String($0)) }
+        for dir in dirs {
+            let files = try ModelLocator.standard.streamingFiles(in: dir)
+            let modelConfig = sherpaOnnxOnlineModelConfig(
+                tokens: files.tokens,
+                transducer: sherpaOnnxOnlineTransducerModelConfig(encoder: files.encoder, decoder: files.decoder, joiner: files.joiner),
+                numThreads: 4, modelType: ""
+            )
+            var config = sherpaOnnxOnlineRecognizerConfig(
+                featConfig: sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80), modelConfig: modelConfig, enableEndpoint: false
+            )
+            let recognizer = SherpaOnnxRecognizer(config: &config)
+            var seen = 0
+            var delays: [Double] = []
+            let t0 = Date()
+            for start in stride(from: 0, to: audio.count, by: 1600) {
+                let end = min(start + 1600, audio.count)
+                recognizer.acceptWaveform(samples: Array(audio[start..<end]), sampleRate: 16000)
+                while recognizer.isReady() { recognizer.decode() }
+                let times = recognizer.getResult().timestamps
+                if times.count > seen {
+                    let now = Double(end) / 16000
+                    delays += times[seen...].map { now - Double($0) }
+                    seen = times.count
+                }
+            }
+            let compute = Date().timeIntervalSince(t0)
+            let sorted = delays.sorted()
+            guard !sorted.isEmpty else { continue }
+            print(String(format: "EMIT %@: %d tokens, delay median %.2fs p90 %.2fs max %.2fs; compute RTF %.3f",
+                         dir.lastPathComponent, sorted.count, sorted[sorted.count / 2], sorted[sorted.count * 9 / 10],
+                         sorted.last!, compute / (Double(audio.count) / 16000)))
+        }
+    }
+}
+
+extension EvaluationTests {
+    /// Seconds from pressing record to listening, per engine, with the user's installed models.
+    func testStartupTime() async throws {
+        let engines = LocalEngines()
+        var parts: [(String, () async throws -> Void)] = []
+        let streaming = try engines.makeStreaming(engines.resolveStreaming(.auto))
+        parts.append(("streaming \(streaming.providerID)", { try await streaming.prepare() }))
+        if let corrector = try engines.makeCorrector(engines.resolveCorrector(.auto)) {
+            parts.append(("corrector \(corrector.providerID)", { try await corrector.prepare() }))
+        }
+        if let labeler = engines.makeSpeakerLabeler() { parts.append(("speaker labeler", { try await labeler.prepare(expectedSpeakers: 0) })) }
+        if let vad = engines.makeVoiceDetector() { parts.append(("voice detector", { try await vad.prepare() })) }
+        for (name, prepare) in parts {
+            let t0 = Date()
+            try await prepare()
+            print(String(format: "STARTUP %-28@ %.2fs", name as NSString, Date().timeIntervalSince(t0)))
+        }
     }
 }

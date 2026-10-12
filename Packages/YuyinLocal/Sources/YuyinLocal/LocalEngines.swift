@@ -5,11 +5,15 @@ import YuyinCore
 /// engine construction and the UI summary, so what the UI shows is what runs.
 public struct LocalEngines: Sendable {
     public enum Streaming: Equatable, Sendable {
+        case xasr
+        /// Zipformer (2023), before X-ASR.
         case sherpa
         case appleSpeech
     }
 
     public enum Corrector: Equatable, Sendable {
+        /// Qwen3-ASR 1.7B through llama.cpp (macOS).
+        case llamaQwen3
         case senseVoiceANE
         case sherpa(SherpaOfflineCorrector.Kind)
         case appleSpeech
@@ -21,6 +25,8 @@ public struct LocalEngines: Sendable {
     private let onDeviceSpeech: @Sendable () -> Bool
     /// User vocabulary for models that support it (comma-separated).
     public var hotwords: String = ""
+    /// Context for models that read it (Qwen3-ASR 1.7B): the domain and its terms.
+    public var background: String?
 
     public init(locator: ModelLocator = .standard, onDeviceSpeech: (@Sendable () -> Bool)? = nil) {
         self.locator = locator
@@ -30,16 +36,18 @@ public struct LocalEngines: Sendable {
     // MARK: - Resolution
 
     public func resolveStreaming(_ choice: StreamingEngineChoice) throws -> Streaming {
-        let sherpaReady = locator.isInstalled(.streamingZipformer)
+        // X-ASR when installed: on the user's legal meeting its live text had ~40% fewer errors.
+        let sherpa: Streaming? = locator.isInstalled(.streamingXASR) ? .xasr
+            : locator.isInstalled(.streamingZipformer) ? .sherpa : nil
         switch choice {
         case .sherpa:
-            guard sherpaReady else { throw ASRError.modelMissing(ModelKind.streamingZipformer.title) }
-            return .sherpa
+            guard let sherpa else { throw ASRError.modelMissing(ModelKind.streamingXASR.title) }
+            return sherpa
         case .appleSpeech:
             return .appleSpeech
         case .auto:
-            if sherpaReady { return .sherpa }
-            guard onDeviceSpeech() else { throw ASRError.modelMissing(ModelKind.streamingZipformer.title) }
+            if let sherpa { return sherpa }
+            guard onDeviceSpeech() else { throw ASRError.modelMissing(ModelKind.streamingXASR.title) }
             return .appleSpeech
         }
     }
@@ -50,6 +58,9 @@ public struct LocalEngines: Sendable {
             return plan
         }
         switch choice {
+        case .qwen3ASRLarge:
+            guard Self.supportsLlama else { throw ASRError.unavailable("Qwen3-ASR 1.7B 仅支持 Mac") }
+            return try require(.qwen3ASRLarge, .llamaQwen3)
         case .paraformer: return try require(.paraformer, .sherpa(.paraformer))
         case .senseVoiceANE: return try require(.senseVoiceANE, .senseVoiceANE)
         case .senseVoice: return try require(.senseVoice, .sherpa(.senseVoice))
@@ -69,8 +80,10 @@ public struct LocalEngines: Sendable {
 
     static var autoOrder: [(ModelKind, Corrector)] {
         #if os(macOS)
+        // Qwen3-ASR 1.7B: most accurate on the user's legal meeting and, on the GPU, fastest.
         // Fun-ASR-Nano: best on mixed Chinese/English and English; Paraformer: fast, Chinese only.
         return [
+            (.qwen3ASRLarge, .llamaQwen3),
             (.funASRNano, .sherpa(.funASRNano)),
             (.paraformer, .sherpa(.paraformer)),
             (.senseVoiceANE, .senseVoiceANE),
@@ -92,13 +105,36 @@ public struct LocalEngines: Sendable {
 
     public func makeStreaming(_ plan: Streaming) throws -> any StreamingASREngine {
         switch plan {
+        case .xasr:
+            return SherpaStreamingEngine(files: try locator.streamingFiles(in: locator.directory(for: .streamingXASR)),
+                                         providerID: "sherpa-x-asr")
         case .sherpa: return SherpaStreamingEngine(files: try locator.streamingFiles())
         case .appleSpeech: return AppleSpeechStreamingEngine()
         }
     }
 
+    /// llama.cpp is linked on macOS only (its xcframework has no iOS simulator slice).
+    public static var supportsLlama: Bool {
+        #if canImport(llama)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     public func makeCorrector(_ plan: Corrector) throws -> (any CorrectorASREngine)? {
         switch plan {
+        case .llamaQwen3:
+            #if canImport(llama)
+            let files = try locator.ggufFiles()
+            // LLM-based: guard against words invented from noise, like the others.
+            return GuardedCorrector(
+                primary: LlamaASRCorrector(model: files.model, projector: files.projector, background: background),
+                gate: makeGate()
+            )
+            #else
+            throw ASRError.unavailable("Qwen3-ASR 1.7B 仅支持 Mac")
+            #endif
         case .senseVoiceANE:
             return FluidSenseVoiceCorrector(directory: locator.directory(for: .senseVoiceANE))
         case .sherpa(let kind):
@@ -146,6 +182,11 @@ public struct LocalEngines: Sendable {
         return SherpaSpeakerLabeler(model: model)
     }
 
+    /// The bundled Silero VAD; used in every mode, since segmentation always runs on device.
+    public func makeVoiceDetector() -> (any VoiceActivityDetecting)? {
+        SherpaVoiceDetector.bundledModel.map { SherpaVoiceDetector(model: $0) }
+    }
+
     public var canLabelSpeakers: Bool {
         locator.isInstalled(.speakerEmbedding)
     }
@@ -154,6 +195,7 @@ public struct LocalEngines: Sendable {
 public extension LocalEngines.Streaming {
     var title: String {
         switch self {
+        case .xasr: return "X-ASR"
         case .sherpa: return "Sherpa Zipformer"
         case .appleSpeech: return "系统语音识别"
         }
@@ -177,6 +219,7 @@ extension SherpaOfflineCorrector.Kind {
 public extension LocalEngines.Corrector {
     var title: String {
         switch self {
+        case .llamaQwen3: return "Qwen3-ASR 1.7B"
         case .senseVoiceANE: return "SenseVoice（神经网络引擎）"
         case .sherpa(.senseVoice): return "SenseVoice"
         case .sherpa(.paraformer): return "Paraformer"

@@ -256,8 +256,18 @@ private struct RecognitionSettings: View {
             }
             RowDivider()
             SettingsRow(title: "句末纠错") {
-                MenuPicker(items: CorrectorChoice.allCases, selection: $preferences.settings.corrector) { $0.title }
+                MenuPicker(items: CorrectorChoice.allCases.filter { $0 != .qwen3ASRLarge || LocalEngines.supportsLlama },
+                           selection: $preferences.settings.corrector) { $0.title }
             }
+        }
+
+        SettingsGroup(title: "专业词汇",
+                      footer: "当事人、公司、人名等专有名词被写成同音或近音字时自动改回（3 个字以上才按近音）；固定的错误可写成「备诉=反诉」精确替换。用 Fun-ASR-Nano 纠错时，前 20 个还会作为热词。") {
+            SettingsRow(title: "法律术语校正", detail: "如「新政」→「心证」、「权力瑕疵」→「权利瑕疵」") {
+                HUDToggle(isOn: $preferences.settings.legalTerms)
+            }
+            RowDivider()
+            VocabularyField()
         }
 
         SettingsGroup(title: "断句", footer: "说话慢、常停顿可把「停顿」调大。") {
@@ -272,6 +282,27 @@ private struct RecognitionSettings: View {
     }
 }
 
+/// The user's own terms, one text field; saved as typed, without rewriting what's being typed.
+private struct VocabularyField: View {
+    @Environment(Preferences.self) private var preferences
+    @State private var draft = ""
+
+    var body: some View {
+        TextField("", text: $draft, prompt: Text("逗号或换行分隔：长城汽车，成都航天，备诉=反诉").foregroundStyle(Theme.tertiaryText),
+                  axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(Theme.bodyFont)
+            .foregroundStyle(Theme.textPrimary)
+            .lineLimit(1...4)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .onAppear { draft = preferences.settings.vocabulary.joined(separator: "，") }
+            .onChange(of: draft) { _, text in
+                preferences.settings.vocabulary = AppSettings.parseVocabulary(text)
+            }
+    }
+}
+
 // MARK: - 模型
 
 private struct ModelSettings: View {
@@ -282,8 +313,9 @@ private struct ModelSettings: View {
     #endif
 
     private let groups: [(String, [ModelKind])] = [
-        ("实时字幕", [.streamingZipformer]),
-        ("句末纠错", [.funASRNano, .paraformer, .senseVoiceANE, .senseVoice, .fireRed, .qwen3ASR, .punctuation]),
+        ("实时字幕", [.streamingXASR, .streamingZipformer]),
+        ("句末纠错", (LocalEngines.supportsLlama ? [.qwen3ASRLarge] : [])
+            + [.funASRNano, .paraformer, .senseVoiceANE, .senseVoice, .fireRed, .qwen3ASR, .punctuation]),
         ("多人", [.speakerEmbedding]),
     ]
 

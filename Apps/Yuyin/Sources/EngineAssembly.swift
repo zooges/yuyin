@@ -9,15 +9,20 @@ struct AppEngineProvider: EngineProvider {
     let apiKey: String
 
     func makeEngines(for settings: AppSettings) async throws -> EngineSet {
+        var local = local
+        local.hotwords = settings.hotwords
+        local.background = settings.recognitionBackground
         let labeler = settings.speakerLabeling ? local.makeSpeakerLabeler() : nil
         let translator = makeTranslator(settings)
+        let voiceDetector = local.makeVoiceDetector()
         switch settings.mode {
         case .offline:
             return EngineSet(
                 streaming: try local.makeStreaming(local.resolveStreaming(settings.streamingEngine)),
                 corrector: try local.makeCorrector(local.resolveCorrector(settings.corrector)),
                 speakerLabeler: labeler,
-                translator: translator
+                translator: translator,
+                voiceDetector: voiceDetector
             )
         case .hybrid:
             let fallback = (try? local.resolveCorrector(settings.corrector)).flatMap { try? local.makeCorrector($0) }
@@ -26,14 +31,16 @@ struct AppEngineProvider: EngineProvider {
                 corrector: try CloudEngines.makeCorrector(apiKey: apiKey),
                 fallbackCorrector: fallback,
                 speakerLabeler: labeler,
-                translator: translator
+                translator: translator,
+                voiceDetector: voiceDetector
             )
         case .cloud:
             return EngineSet(
                 streaming: try CloudEngines.makeStreaming(apiKey: apiKey),
                 corrector: try CloudEngines.makeCorrector(apiKey: apiKey),
                 speakerLabeler: labeler,
-                translator: translator
+                translator: translator,
+                voiceDetector: voiceDetector
             )
         }
     }
@@ -105,6 +112,7 @@ enum EngineNames {
     static func display(_ providerID: String) -> String {
         switch providerID {
         case "sherpa-zipformer", "sherpa-streaming-zipformer": return "Zipformer"
+        case "sherpa-x-asr": return "X-ASR"
         case "apple-speech", "apple-speech-offline", "apple-speech-corrector": return "系统识别"
         case "funasr-realtime": return "Fun-ASR 实时"
         case "funasr-cloud", "funasr-correct": return "Fun-ASR 云端"
@@ -114,6 +122,7 @@ enum EngineNames {
         case "sherpa-firered": return "FireRedASR"
         case "sherpa-qwen3-asr": return "Qwen3-ASR"
         case "sherpa-funasr-nano": return "Fun-ASR-Nano"
+        case "llama-qwen3-asr-1.7b": return "Qwen3-ASR 1.7B"
         case "qwen-mt": return "千问 MT"
         case "apple-translation": return "系统翻译"
         default: return providerID

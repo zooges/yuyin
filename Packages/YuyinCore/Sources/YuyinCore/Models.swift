@@ -180,6 +180,15 @@ public enum TextFilter {
         return out.replacingOccurrences(of: " ,", with: ",").trimmingCharacters(in: .whitespaces)
     }
 
+    /// Drops spaces next to Chinese characters and punctuation ("首期款， 通过" from X-ASR's
+    /// BPE output); spaces between Latin words stay.
+    public static func tightenChineseSpacing(_ text: String) -> String {
+        guard text.contains(" ") else { return text }
+        return text.replacingOccurrences(
+            of: #"\s+(?=[\p{Han}，。？！、；：])|(?<=[\p{Han}，。？！、；：])\s+"#, with: "", options: .regularExpression
+        ).trimmingCharacters(in: .whitespaces)
+    }
+
     /// Japanese kana or Korean hangul. Yuyin transcribes Chinese and English; multilingual
     /// recognizers sometimes turn short exclamations into Japanese ("这波" → "ちょっと。").
     public static func containsForeignScript(_ text: String) -> Bool {

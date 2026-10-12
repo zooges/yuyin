@@ -11,10 +11,11 @@ v0.2 重新设计说明（含 v0.1 审查结论）：[`docs/plans/2026-10-11-v0.
 
 | 能力 | 实现 |
 |------|------|
-| 实时字幕 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 流式 Zipformer；未装模型时用系统**本机**语音识别 |
-| 句末纠错 | **Fun-ASR-Nano**（macOS 推荐，中文 / 英文 / 中英混说实测最准）/ Paraformer-large + 中文标点（纯中文，英文句自动交给 SenseVoice）/ SenseVoice（Sherpa 或 [FluidAudio](https://github.com/FluidInference/FluidAudio) 神经网络引擎）/ FireRedASR / Fun-ASR-Nano / Qwen3-ASR；大模型输出有防幻觉过滤 |
+| 实时字幕 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 流式 [X-ASR](https://github.com/Gilgamesh-J/X-ASR)（中英，自带标点；旧版 Zipformer 仍可用）；未装模型时用系统**本机**语音识别 |
+| 句末纠错 | **Qwen3-ASR 1.7B**（macOS 推荐，[llama.cpp](https://github.com/ggml-org/llama.cpp) 显卡加速，参考上文与专业词汇；法律会议录音实测最准、每句约 0.3 秒）/ **Fun-ASR-Nano**（中文 / 英文 / 中英混说）/ Paraformer-large + 中文标点（纯中文，英文句自动交给 SenseVoice）/ SenseVoice（Sherpa 或 [FluidAudio](https://github.com/FluidInference/FluidAudio) 神经网络引擎）/ FireRedASR / Fun-ASR-Nano / Qwen3-ASR；大模型输出有防幻觉过滤 |
 | 云端 | 阿里云百炼 Fun-ASR：实时 WebSocket + 句级同步 HTTP；混合模式失败时回退本机 |
-| 断句 | 连续切分的自适应 VAD（不丢音频）；话没说完的短句等更久的停顿，流式句末需有静音佐证；逐句音量归一化 |
+| 断句 | 内置 Silero VAD 判断有没有人说话（远处、小声的人也算），连续切分不丢音频；长句在短停顿处就断；多人时声纹一变就在换人处断开；逐句音量归一化 |
+| 专业词汇 | 法律术语校正（同音写错的「新政」→「心证」等，按声调和分词严格匹配）；自定义专有名词（当事人、公司）按近音改回，「错写=正确」规则精确替换（借鉴 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) 的音素热词）；同时作为 Qwen3-ASR 的上下文与 Fun-ASR-Nano 的热词 |
 | 记录 | 每次录音保存转写和 16 kHz 录音，录音过程中自动存盘，崩溃后可恢复 |
 | 首页 | 横条：开始录音 · 录音记录 · 设置；实时字幕、录音记录、设置都是从横条向下展开的卡片（macOS 悬浮在最前，不抢焦点） |
 | 音源 | 麦克风 / 系统声音 / 指定应用 / 会议（麦克风 + 系统声音，回声消除）；macOS 14.2+，基于 Core Audio Process Tap |
@@ -90,6 +91,8 @@ docs/                 设计文档与测试清单
 | 依赖 | 用途 |
 |------|------|
 | sherpa-onnx | 流式 Zipformer；离线 SenseVoice / Paraformer / FireRed；说话人模型 |
+| llama.cpp | Qwen3-ASR 1.7B（GGUF，音频经 mtmd 输入，Metal 加速；仅 macOS） |
+| [Silero VAD](https://github.com/snakers4/silero-vad) | 断句时判断有没有人在说话（MIT，随 App 内置） |
 | FluidAudio | SenseVoice CoreML（神经网络引擎） |
 | Apple Speech | 未装模型时的本机回退（强制本机识别） |
 | 阿里云百炼 Fun-ASR | 混合 / 云端模式 |

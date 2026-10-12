@@ -38,6 +38,17 @@ public final class SherpaSpeakerLabeler: SpeakerLabeling, @unchecked Sendable {
         }
     }
 
+    public func embed(_ samples: [Float]) async -> [Float]? {
+        await SherpaRuntime.run(on: queue) { [self] in
+            guard let extractor else { return nil }
+            let stream = extractor.createStream()
+            stream.acceptWaveform(samples: samples, sampleRate: AudioSpec.sampleRate)
+            stream.inputFinished()
+            guard extractor.isReady(stream: stream) else { return nil }
+            return extractor.compute(stream: stream)
+        }
+    }
+
     public func shutdown() async {
         await SherpaRuntime.run(on: queue) { [self] in extractor = nil }
     }

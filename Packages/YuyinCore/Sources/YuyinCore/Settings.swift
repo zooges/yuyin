@@ -1,7 +1,7 @@
 import Foundation
 
 public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Identifiable {
-    /// Sherpa Zipformer if installed, otherwise on-device Apple Speech.
+    /// Sherpa X-ASR or Zipformer if installed, otherwise on-device Apple Speech.
     case auto
     case sherpa
     case appleSpeech
@@ -11,7 +11,7 @@ public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Iden
     public var title: String {
         switch self {
         case .auto: return "自动"
-        case .sherpa: return "Sherpa Zipformer"
+        case .sherpa: return "本机模型（X-ASR / Zipformer）"
         case .appleSpeech: return "系统语音识别（本机）"
         }
     }
@@ -20,6 +20,7 @@ public enum StreamingEngineChoice: String, Codable, CaseIterable, Sendable, Iden
 public enum CorrectorChoice: String, Codable, CaseIterable, Sendable, Identifiable {
     /// Best installed local model.
     case auto
+    case qwen3ASRLarge
     case funASRNano
     case paraformer
     case senseVoiceANE
@@ -39,7 +40,8 @@ public enum CorrectorChoice: String, Codable, CaseIterable, Sendable, Identifiab
         case .senseVoice: return "SenseVoice · Sherpa"
         case .paraformer: return "Paraformer-large（纯中文）"
         case .fireRed: return "FireRedASR 大模型"
-        case .funASRNano: return "Fun-ASR-Nano（推荐，中英混说）"
+        case .qwen3ASRLarge: return "Qwen3-ASR 1.7B（推荐，Mac）"
+        case .funASRNano: return "Fun-ASR-Nano（中英混说）"
         case .qwen3ASR: return "Qwen3-ASR 大模型"
         case .appleSpeech: return "系统语音识别（本机）"
         case .none: return "不纠错"
@@ -65,6 +67,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var audioAppBundleID: String?
     /// macOS: keep the recording bar above other windows.
     public var floatOnTop: Bool
+    /// Put legal terms back where the recognizer wrote a same-sounding word (`LegalVocabulary`).
+    public var legalTerms: Bool
+    /// The user's own terms (parties, companies, people): corrected the same way, and given to
+    /// recognizers that take hotwords.
+    public var vocabulary: [String]
 
     public init(
         mode: TranscriptMode = .offline,
@@ -77,7 +84,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         translation: TranslationOptions = TranslationOptions(),
         audioSource: AudioSourceChoice = .microphone,
         audioAppBundleID: String? = nil,
-        floatOnTop: Bool = true
+        floatOnTop: Bool = true,
+        legalTerms: Bool = true,
+        vocabulary: [String] = []
     ) {
         self.mode = mode
         self.streamingEngine = streamingEngine
@@ -90,11 +99,45 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.audioSource = audioSource
         self.audioAppBundleID = audioAppBundleID
         self.floatOnTop = floatOnTop
+        self.legalTerms = legalTerms
+        self.vocabulary = vocabulary
+    }
+
+    /// Terms typed by the user, separated by commas, 、, semicolons or line breaks; "错写=正确"
+    /// entries are rules.
+    public static func parseVocabulary(_ text: String) -> [String] {
+        var seen: Set<String> = []
+        return text.components(separatedBy: CharacterSet(charactersIn: ",，、;；\n"))
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// Hotwords for recognizers that take them: the user's terms and rule targets. Fun-ASR-Nano
+    /// fits prompt, audio and text in 512 tokens; ~120 legal terms left no room and every
+    /// sentence came back empty.
+    public var hotwords: String {
+        TermLexicon(names: vocabulary).hotwords.prefix(20).joined(separator: ",")
+    }
+
+    /// What recognizers that read context (Qwen3-ASR 1.7B) are told about the recording: the
+    /// domain and the terms to expect. On the user's legal meeting this got names and terms
+    /// right far more often ("成都航天" 6× vs 2×, "律师" 8× vs 2×).
+    public var recognitionBackground: String? {
+        let terms = TermLexicon(names: vocabulary).hotwords + (legalTerms ? LegalVocabulary.terms : [])
+        var parts: [String] = []
+        if legalTerms { parts.append("这是律师、法务讨论法律事务的会议录音。") }
+        if !terms.isEmpty { parts.append("可能出现的术语：" + terms.joined(separator: "，")) }
+        return parts.isEmpty ? nil : parts.joined()
+    }
+
+    /// Everything the term correction knows for these settings.
+    public var termLexicon: TermLexicon {
+        TermLexicon(terms: legalTerms ? LegalVocabulary.terms : [], names: vocabulary)
     }
 
     private enum CodingKeys: String, CodingKey {
         case mode, streamingEngine, corrector, silenceMs, maxUtteranceSeconds, speakerLabeling, expectedSpeakers
-        case translation, audioSource, audioAppBundleID, floatOnTop
+        case translation, audioSource, audioAppBundleID, floatOnTop, legalTerms, vocabulary
         // v0.1 keys
         case preferSherpaWhenAvailable, preferFireRedCorrector, enableSpeakerLabeling, expectedSpeakerCount
     }
@@ -124,6 +167,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         audioSource = (try? c.decodeIfPresent(AudioSourceChoice.self, forKey: .audioSource)) ?? defaults.audioSource
         audioAppBundleID = try? c.decodeIfPresent(String.self, forKey: .audioAppBundleID)
         floatOnTop = (try? c.decodeIfPresent(Bool.self, forKey: .floatOnTop)) ?? defaults.floatOnTop
+        legalTerms = (try? c.decodeIfPresent(Bool.self, forKey: .legalTerms)) ?? defaults.legalTerms
+        vocabulary = (try? c.decodeIfPresent([String].self, forKey: .vocabulary)) ?? defaults.vocabulary
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -139,6 +184,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try c.encode(audioSource, forKey: .audioSource)
         try c.encodeIfPresent(audioAppBundleID, forKey: .audioAppBundleID)
         try c.encode(floatOnTop, forKey: .floatOnTop)
+        try c.encode(legalTerms, forKey: .legalTerms)
+        try c.encode(vocabulary, forKey: .vocabulary)
     }
 }
 

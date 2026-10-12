@@ -22,7 +22,17 @@ public protocol StreamingASREngine: AnyObject, Sendable {
     func accept(_ samples: [Float]) async throws -> StreamingUpdate
     /// Closes the open sentence, returns its text and starts a fresh one.
     func finishUtterance() async -> String
+    /// Like `finishUtterance()` for a cut `seconds` after the sentence began (a cut in the
+    /// past): only the text heard before that point. The session feeds the audio after it again.
+    func finishUtterance(keepingUntil seconds: Double) async -> String
     func shutdown() async
+}
+
+public extension StreamingASREngine {
+    /// Engines without token times keep all text; the next sentence repeats a few words.
+    func finishUtterance(keepingUntil seconds: Double) async -> String {
+        await finishUtterance()
+    }
 }
 
 /// Second pass: re-decode one sentence with a more accurate model.
@@ -47,6 +57,36 @@ public protocol SpeakerLabeling: AnyObject, Sendable {
     func prepare(expectedSpeakers: Int) async throws
     /// nil when the clip is too short or unusable. `speechMs` = voiced duration of the clip.
     func assign(_ samples: [Float], speechMs: Int) async throws -> Int?
+    /// The clip's voice embedding, for finding speaker changes inside a sentence; nil when
+    /// unsupported or the clip is unusable.
+    func embed(_ samples: [Float]) async -> [Float]?
+    func shutdown() async
+}
+
+public extension SpeakerLabeling {
+    func embed(_ samples: [Float]) async -> [Float]? { nil }
+}
+
+/// One decision of a model-based voice detector: whether the audio up to `endSample`
+/// (absolute within the session) is speech.
+public struct VoiceDecision: Equatable, Sendable {
+    public let endSample: Int
+    public let isSpeech: Bool
+
+    public init(endSample: Int, isSpeech: Bool) {
+        self.endSample = endSample
+        self.isSpeech = isSpeech
+    }
+}
+
+/// Decides speech by what the audio sounds like rather than how loud it is. In a meeting
+/// room the energy VAD's noise floor rose with continuous discussion until distant voices
+/// counted as silence, so sentences were cut in mid-speech and merged across speakers.
+/// Calls are serialized by the session, in capture order.
+public protocol VoiceActivityDetecting: AnyObject, Sendable {
+    func prepare() async throws
+    /// Decisions for the windows completed by `samples`, in order.
+    func detect(_ samples: [Float]) async -> [VoiceDecision]
     func shutdown() async
 }
 
@@ -76,19 +116,23 @@ public struct EngineSet: Sendable {
     public var fallbackCorrector: (any CorrectorASREngine)?
     public var speakerLabeler: (any SpeakerLabeling)?
     public var translator: (any TextTranslator)?
+    /// nil = the segmenter's energy VAD decides on its own.
+    public var voiceDetector: (any VoiceActivityDetecting)?
 
     public init(
         streaming: any StreamingASREngine,
         corrector: (any CorrectorASREngine)?,
         fallbackCorrector: (any CorrectorASREngine)? = nil,
         speakerLabeler: (any SpeakerLabeling)? = nil,
-        translator: (any TextTranslator)? = nil
+        translator: (any TextTranslator)? = nil,
+        voiceDetector: (any VoiceActivityDetecting)? = nil
     ) {
         self.streaming = streaming
         self.corrector = corrector
         self.fallbackCorrector = fallbackCorrector
         self.speakerLabeler = speakerLabeler
         self.translator = translator
+        self.voiceDetector = voiceDetector
     }
 }
 

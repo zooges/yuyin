@@ -36,7 +36,16 @@ public struct SegmenterConfig: Equatable, Sendable {
     /// a sentence only once the VAD has heard at least this much pause as well…
     public var endpointSilenceMs = 400
     /// …unless the sentence is already this long (continuous audio where the VAD never pauses).
+    /// Energy VAD only: a voice model does hear the pauses in continuous speech.
     public var endpointBackstopMs = 8_000
+    /// With a voice model, a long sentence closes at a shorter pause (a breath between clauses)
+    /// instead of running on to the length cut, which falls in the past and splits words there.
+    public var longSentenceMs = 6_000
+    public var longSentenceSilenceMs = 450
+    public var veryLongSentenceMs = 10_000
+    public var veryLongSentenceSilenceMs = 250
+    /// A voice model reports speech only after hearing some of it; the sentence starts this much earlier.
+    public var voiceOnsetMs = 200
 
     public init() {}
 
@@ -51,6 +60,8 @@ public struct Segment: Equatable, Sendable {
     public enum Reason: Equatable, Sendable {
         case silence
         case maxLength
+        /// Another voice took over without a pause (cut in the past, speech continues).
+        case speakerChange
         case forced
     }
 
@@ -64,7 +75,7 @@ public struct Segment: Equatable, Sendable {
     public let reason: Reason
 }
 
-/// Sentence segmentation with an energy VAD.
+/// Sentence segmentation with an energy VAD, or a voice model's decisions when available.
 ///
 /// **Contiguous**: every segment spans from the previous cut to this one, so no audio the
 /// recognizer heard is ever left out — the VAD only chooses *where* to cut. (An earlier
@@ -87,8 +98,14 @@ public struct UtteranceSegmenter: Sendable {
     private var buffer: [Float] = []
     private var bufferStart = 0
     private var total = 0
-    /// End position and smoothed level of each frame still in `buffer` (soft cut points).
-    private var frames: [(end: Int, level: Float)] = []
+    /// End position, smoothed level and voice-model verdict of each frame still in `buffer`
+    /// (soft cut points).
+    private var frames: [(end: Int, level: Float, speech: Bool)] = []
+
+    /// Speech is decided by a voice model's decisions (`push(_:voice:)`), not by level.
+    public private(set) var usesVoiceModel = false
+    private var voiceQueue: [VoiceDecision] = []
+    private var voiceSpeech = false
 
     private var inSpeech = false
     private var lastVoicedEnd = 0
@@ -121,26 +138,39 @@ public struct UtteranceSegmenter: Sendable {
         AudioSpec.milliseconds(forSamples: total - (firstSpeech ?? bufferStart))
     }
 
-    /// Pause that closes the open sentence (longer while it is still short).
+    /// Pause that closes the open sentence: longer while it is still short; with a voice
+    /// model, shorter once it is long.
     public var requiredSilenceMs: Int {
-        AudioSpec.milliseconds(forSamples: voicedSamples) < config.shortSentenceMs
-            ? max(config.silenceMs, config.shortSentenceSilenceMs)
-            : config.silenceMs
+        if AudioSpec.milliseconds(forSamples: voicedSamples) < config.shortSentenceMs {
+            return max(config.silenceMs, config.shortSentenceSilenceMs)
+        }
+        guard usesVoiceModel else { return config.silenceMs }
+        if openDurationMs >= config.veryLongSentenceMs { return min(config.silenceMs, config.veryLongSentenceSilenceMs) }
+        if openDurationMs >= config.longSentenceMs { return min(config.silenceMs, config.longSentenceSilenceMs) }
+        return config.silenceMs
     }
 
     /// Whether a recognizer endpoint should close the open sentence now.
     public var acceptsEndpoint: Bool {
         // Speech the VAD missed entirely (very quiet) can only be closed by the recognizer.
         guard firstSpeech != nil else { return true }
-        if openDurationMs >= config.endpointBackstopMs { return true }
+        if !usesVoiceModel, openDurationMs >= config.endpointBackstopMs { return true }
         let isShort = AudioSpec.milliseconds(forSamples: voicedSamples) < config.shortSentenceMs
-        return trailingSilenceMs >= (isShort ? requiredSilenceMs : config.endpointSilenceMs)
+        return trailingSilenceMs >= (isShort ? requiredSilenceMs : min(config.endpointSilenceMs, requiredSilenceMs))
     }
 
     public var isEmpty: Bool { buffer.isEmpty }
 
-    /// Feeds samples; returns sentences closed by silence or length.
-    public mutating func push(_ samples: [Float]) -> [Segment] {
+    /// From now on speech is what the voice model says; every `push` must then carry the
+    /// decisions for its samples.
+    public mutating func useVoiceModel() {
+        usesVoiceModel = true
+    }
+
+    /// Feeds samples; returns sentences closed by silence or length. `voice` holds the voice
+    /// model's decisions for windows completed by these samples (ignored without `useVoiceModel()`).
+    public mutating func push(_ samples: [Float], voice: [VoiceDecision] = []) -> [Segment] {
+        if usesVoiceModel { voiceQueue.append(contentsOf: voice) }
         guard !samples.isEmpty else { return [] }
         buffer.append(contentsOf: samples)
         var closed: [Segment] = []
@@ -165,6 +195,27 @@ public struct UtteranceSegmenter: Sendable {
     /// Closes the open sentence now (engine endpoint, pause, stop). Keeps everything.
     public mutating func cut() -> Segment? {
         cut(at: total, reason: .forced)
+    }
+
+    /// Audio of the open sentence from `absolute` on (clamped to what is still buffered).
+    public func samples(from absolute: Int) -> [Float] {
+        let from = min(max(absolute, bufferStart), total)
+        return Array(buffer[(from - bufferStart)...])
+    }
+
+    /// Closes the open sentence where another speaker took over, near `sample`: at the frame
+    /// within ±300 ms the voice model heard no speech in, else the quietest. Speech continues.
+    public mutating func cutForSpeakerChange(near sample: Int) -> Segment? {
+        guard inSpeech else { return nil }
+        let reach = AudioSpec.samples(forMilliseconds: 300)
+        var best: (end: Int, level: Float, speech: Bool)?
+        for frame in frames where abs(frame.end - sample) <= reach && frame.end > bufferStart && frame.end < total {
+            guard let current = best else { best = frame; continue }
+            if (current.speech && !frame.speech) || (current.speech == frame.speech && frame.level < current.level) {
+                best = frame
+            }
+        }
+        return cut(at: best?.end ?? sample, reason: .speakerChange)
     }
 
     /// Drops leading audio older than `keepingMs` while nobody is speaking. Call only when
@@ -192,18 +243,28 @@ public struct UtteranceSegmenter: Sendable {
         let level = AudioSpec.rms(pendingFrame[...])
         let smoothed = smooth(level)
         updateNoiseFloor(level: smoothed)
-        frames.append((frameEnd, smoothed))
+        let modelSpeech = usesVoiceModel ? voiceVerdict(at: frameEnd) : nil
+        frames.append((frameEnd, smoothed, modelSpeech ?? false))
 
-        if !inSpeech {
+        if let speech = modelSpeech {
+            if !inSpeech {
+                if speech {
+                    startSpeech(at: frameEnd - frameLength - AudioSpec.samples(forMilliseconds: config.voiceOnsetMs),
+                                frameEnd: frameEnd, voiced: frameLength)
+                }
+            } else if speech {
+                lastVoicedEnd = frameEnd
+                voicedSamples += frameLength
+            } else if let segment = closeIfPaused(at: frameEnd) {
+                return segment
+            }
+        } else if !inSpeech {
             onsetRun = smoothed > onsetThreshold && level > holdThreshold ? onsetRun + 1 : 0
             if onsetRun >= config.onsetFrames {
                 // Speech began at the first of the loud frames.
-                let onset = frameEnd - frameLength * config.onsetFrames
-                inSpeech = true
-                lastVoicedEnd = frameEnd
-                voicedSamples = frameLength * config.onsetFrames
+                startSpeech(at: frameEnd - frameLength * config.onsetFrames,
+                            frameEnd: frameEnd, voiced: frameLength * config.onsetFrames)
                 onsetRun = 0
-                if firstSpeech == nil { firstSpeech = max(bufferStart, onset) }
             }
         } else {
             // Inside a sentence: the smoothed level decides whether the pause continues;
@@ -213,14 +274,8 @@ public struct UtteranceSegmenter: Sendable {
                 lastVoicedEnd = frameEnd
                 voicedSamples += frameLength
             }
-            if !holding, frameEnd - lastVoicedEnd >= AudioSpec.samples(forMilliseconds: requiredSilenceMs) {
-                if voicedSamples >= AudioSpec.samples(forMilliseconds: config.minSpeechMs) {
-                    let end = min(frameEnd, lastVoicedEnd + AudioSpec.samples(forMilliseconds: config.trailingPadMs))
-                    return cut(at: end, reason: .silence)
-                }
-                // A click or a cough: not a sentence (its audio stays in the buffer).
-                inSpeech = false
-                voicedSamples = 0
+            if !holding, let segment = closeIfPaused(at: frameEnd) {
+                return segment
             }
         }
 
@@ -230,7 +285,41 @@ public struct UtteranceSegmenter: Sendable {
         return nil
     }
 
-    /// End of the quietest frame in the last few seconds (not the very last 300 ms).
+    private mutating func startSpeech(at onset: Int, frameEnd: Int, voiced: Int) {
+        inSpeech = true
+        lastVoicedEnd = frameEnd
+        voicedSamples = voiced
+        if firstSpeech == nil { firstSpeech = max(bufferStart, onset) }
+    }
+
+    /// Inside a pause: closes the sentence once the pause is long enough.
+    private mutating func closeIfPaused(at frameEnd: Int) -> Segment? {
+        guard frameEnd - lastVoicedEnd >= AudioSpec.samples(forMilliseconds: requiredSilenceMs) else { return nil }
+        if voicedSamples >= AudioSpec.samples(forMilliseconds: config.minSpeechMs) {
+            let end = min(frameEnd, lastVoicedEnd + AudioSpec.samples(forMilliseconds: config.trailingPadMs))
+            return cut(at: end, reason: .silence)
+        }
+        // A click or a cough: not a sentence (its audio stays in the buffer).
+        inSpeech = false
+        voicedSamples = 0
+        return nil
+    }
+
+    /// The latest decision whose window ends by `frameEnd`. Later decisions are never used
+    /// even when already known, so the result doesn't depend on how audio was chunked.
+    private mutating func voiceVerdict(at frameEnd: Int) -> Bool {
+        var used = 0
+        for decision in voiceQueue {
+            guard decision.endSample <= frameEnd else { break }
+            voiceSpeech = decision.isSpeech
+            used += 1
+        }
+        if used > 0 { voiceQueue.removeFirst(used) }
+        return voiceSpeech
+    }
+
+    /// End of the quietest frame in the last few seconds (not the very last 300 ms),
+    /// preferring frames the voice model heard no speech in.
     private func softCutPoint() -> Int {
         // Never cut so early that the segment is only the leading silence.
         let windowStart = max(
@@ -238,9 +327,12 @@ public struct UtteranceSegmenter: Sendable {
             bufferStart + AudioSpec.samples(forMilliseconds: config.maxUtteranceMs / 2)
         )
         let windowEnd = total - AudioSpec.samples(forMilliseconds: 300)
-        var best: (end: Int, level: Float)?
+        var best: (end: Int, level: Float, speech: Bool)?
         for frame in frames where frame.end > windowStart && frame.end <= windowEnd {
-            if best == nil || frame.level < best!.level { best = frame }
+            guard let current = best else { best = frame; continue }
+            if (current.speech && !frame.speech) || (current.speech == frame.speech && frame.level < current.level) {
+                best = frame
+            }
         }
         return best?.end ?? total
     }
@@ -282,6 +374,9 @@ public struct UtteranceSegmenter: Sendable {
         let start = bufferStart
         let speechFrom = firstSpeech.map { min(max($0, start), end) } ?? start
         let speechTo = firstSpeech != nil ? min(max(lastVoicedEnd, speechFrom), end) : end
+        let continues = (reason == .maxLength || reason == .speakerChange) && inSpeech
+        // Speech the voice model heard after a cut in the past belongs to the next sentence.
+        let carried = continues && usesVoiceModel ? frames.filter { $0.end > end && $0.speech }.count * frameLength : 0
 
         let segment = Segment(
             samples: Array(buffer[0..<(end - start)]),
@@ -289,13 +384,13 @@ public struct UtteranceSegmenter: Sendable {
             endSample: end,
             speechStartSample: speechFrom,
             speechEndSample: speechTo,
-            speechMs: AudioSpec.milliseconds(forSamples: voicedSamples),
+            speechMs: AudioSpec.milliseconds(forSamples: max(0, voicedSamples - carried)),
             reason: reason
         )
 
         dropBuffer(before: end)
-        voicedSamples = 0
-        if reason == .maxLength && inSpeech {
+        voicedSamples = carried
+        if continues {
             // Speech continues straight into the next sentence.
             firstSpeech = end
             lastVoicedEnd = max(lastVoicedEnd, end)

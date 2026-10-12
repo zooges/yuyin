@@ -124,3 +124,102 @@ final class TextAndSpeakerTests: XCTestCase {
         XCTAssertEqual(map[u3.id], .some(nil))
     }
 }
+
+final class ChineseSpacingTests: XCTestCase {
+    func testSpacesNextToChineseGoButLatinWordsKeepTheirs() {
+        XCTAssertEqual(TextFilter.tightenChineseSpacing("首期款， 通过承租 公交的方式"), "首期款，通过承租公交的方式")
+        XCTAssertEqual(TextFilter.tightenChineseSpacing("我们用 Fun ASR 来转写"), "我们用Fun ASR来转写")
+        XCTAssertEqual(TextFilter.tightenChineseSpacing("Let's sync again."), "Let's sync again.")
+    }
+}
+
+final class TermLexiconTests: XCTestCase {
+    /// Real errors from the user's case discussion.
+    func testLegalTermsReplaceSameSoundingWords() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms)
+        XCTAssertEqual(lexicon.correct("纯粹是为了影响法官的新政。"), "纯粹是为了影响法官的心证。")
+        XCTAssertEqual(lexicon.correct("这个设备本身存在权力瑕疵"), "这个设备本身存在权利瑕疵")
+        XCTAssertEqual(lexicon.correct("就是诉讼旅行的问题"), "就是诉讼履行的问题")
+    }
+
+    func testDifferentTonesAndAmbiguousWordsStay() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms)
+        // 语气 yǔqì ≠ 逾期 yúqī; 权力 and 定金 / 订金 are law terms of their own.
+        for text in ["我解除函只说了语气", "公权力的边界", "先付了订金", "我们才定下来", "现在甚至证据都没有"] {
+            XCTAssertEqual(lexicon.correct(text), text)
+        }
+    }
+
+    func testUserTermsWithLatinLettersAreIgnoredAndOthersApply() {
+        let settings = AppSettings(legalTerms: false, vocabulary: ["长城汽车", "ABC公司", " "])
+        let lexicon = settings.termLexicon
+        XCTAssertEqual(lexicon.correct("我们一直和长成汽车合作"), "我们一直和长城汽车合作")
+        XCTAssertEqual(lexicon.correct("影响法官的新政"), "影响法官的新政", "legal terms are off")
+    }
+
+    /// Sounds alike but not the same: only long terms, ≥ 75% alike, on word boundaries.
+    func testSimilarSoundingLongTermsAreCorrected() {
+        let lexicon = TermLexicon(names: ["成都航天", "王海林", "徐律师", "作业指导书"])
+        // 行间 xíngjiān / 航天 hángtiān.
+        XCTAssertEqual(lexicon.correct("就是以成都行间的这些专利"), "就是以成都航天的这些专利")
+        // 宁 níng / 林 lín: a near miss.
+        XCTAssertEqual(lexicon.correct("刚才王海宁说"), "刚才王海林说")
+        // Other lawyers in the meeting: a different surname is not a near miss.
+        XCTAssertEqual(lexicon.correct("我跟那个王律师讨论过石律师的逻辑"), "我跟那个王律师讨论过石律师的逻辑")
+        // Nothing alike enough: left alone.
+        XCTAssertEqual(lexicon.correct("物业制造书"), "物业制造书")
+    }
+
+    func testTwoCharacterTermsNeedTheSameSound() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms)
+        // 指正 zhǐzhèng is one tone away from 质证 zhìzhèng.
+        XCTAssertEqual(lexicon.correct("请大家批评指正"), "请大家批评指正")
+    }
+
+    /// Built-in terms begin with everyday words; similar sound would rewrite those (seen on the
+    /// user's meeting), so they need the same sound.
+    func testBuiltInTermsNeverMatchBySimilarSound() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms)
+        for text in ["这是买卖合同中呢", "他意思就是说我们", "最后一份证据目的是什么", "格鲁伯斯基表示说"] {
+            XCTAssertEqual(lexicon.correct(text), text)
+        }
+        // Not even as a 3-character name: 中 zhōng / 编 biān is more than a near miss.
+        XCTAssertEqual(TermLexicon(names: ["合同编"]).correct("这是买卖合同中呢"), "这是买卖合同中呢")
+        // A character off in initial, final and tone is never a near miss.
+        XCTAssertEqual(TermLexicon(names: ["长城汽车"]).correct("长城的车"), "长城的车")
+    }
+
+    func testRulesReplaceExactlyAndBecomeHotwords() {
+        let lexicon = TermLexicon(names: ["备诉=反诉", "物业制造书 → 作业指导书", "长城汽车", "a=a"])
+        XCTAssertEqual(lexicon.correct("他提了一个备诉，说物业制造书有问题"), "他提了一个反诉，说作业指导书有问题")
+        XCTAssertEqual(lexicon.hotwords, ["反诉", "作业指导书", "长城汽车"])
+    }
+
+    func testPinyinIsSplitIntoInitialFinalAndTone() {
+        XCTAssertEqual(Syllable.parse("zhèng"), Syllable(initial: "zh", final: "eng", tone: 4))
+        XCTAssertEqual(Syllable.parse("lǜ"), Syllable(initial: "l", final: "v", tone: 4))
+        XCTAssertEqual(Syllable.parse("yǔ"), Syllable(initial: "y", final: "v", tone: 3))
+        XCTAssertEqual(Syllable.parse("ér"), Syllable(initial: "", final: "er", tone: 2))
+        XCTAssertEqual(Syllable.parse("de"), Syllable(initial: "d", final: "e", tone: 5))
+    }
+
+    func testSettingsRoundTripKeepsVocabulary() throws {
+        let settings = AppSettings(legalTerms: false, vocabulary: ["成都航天"])
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(decoded.vocabulary, ["成都航天"])
+        XCTAssertFalse(decoded.legalTerms)
+        XCTAssertTrue(try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8)).legalTerms)
+    }
+}
+
+final class VocabularyTests: XCTestCase {
+    func testParsingSplitsOnChineseAndLatinSeparatorsAndDropsDuplicates() {
+        XCTAssertEqual(AppSettings.parseVocabulary("长城汽车，成都航天、 徐律师\n长城汽车;ABC"), ["长城汽车", "成都航天", "徐律师", "ABC"])
+        XCTAssertEqual(AppSettings.parseVocabulary(" ，\n "), [])
+    }
+
+    func testHotwordsStayWithinTheLLMPromptBudget() {
+        let settings = AppSettings(vocabulary: (1...40).map { "名词\($0)" })
+        XCTAssertEqual(settings.hotwords.split(separator: ",").count, 20)
+    }
+}

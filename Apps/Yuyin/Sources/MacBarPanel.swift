@@ -143,6 +143,24 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 panel.snapshot(to: URL(fileURLWithPath: path))
             }
         }
+        // -YuyinReplayWAV <wav>: records the file as if spoken (see AudioCapture), then stops and
+        // deletes the recording; -YuyinSnapshotEvery <prefix> captures the panel every 5 s meanwhile.
+        if let path = UserDefaults.standard.string(forKey: "YuyinReplayWAV"),
+           let samples = try? WAVFile.read(URL(fileURLWithPath: path)) {
+            let seconds = Double(samples.count) / Double(AudioSpec.sampleRate)
+            let prefix = UserDefaults.standard.string(forKey: "YuyinSnapshotEvery")
+            Task {
+                await container.recorder.start(preferences: container.preferences, models: container.models)
+                var waited = 0.0
+                while waited < seconds + 2 {
+                    try? await Task.sleep(for: .seconds(5))
+                    waited += 5
+                    if let prefix { panel.snapshot(to: URL(fileURLWithPath: "\(prefix)-\(Int(waited)).png")) }
+                }
+                if let id = await container.recorder.stop() { await container.library.delete(id) }
+                NSApp.terminate(nil)
+            }
+        }
         // -YuyinOpenAnimation <prefix>: opens 录音记录 and captures frames of the drop-down.
         if let prefix = UserDefaults.standard.string(forKey: "YuyinOpenAnimation") {
             Task {

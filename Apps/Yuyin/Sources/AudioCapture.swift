@@ -5,6 +5,8 @@ import YuyinCore
 struct CaptureChunk: Sendable {
     let samples: [Float]
     let peak: Float
+    /// When the audio arrived (uptime ns), to see how far recognition runs behind.
+    var captured = DispatchTime.now().uptimeNanoseconds
 }
 
 /// Combines the selected sources (microphone and/or system audio) into one ordered
@@ -23,6 +25,9 @@ final class AudioCapture: @unchecked Sendable {
     private var mixer: AudioMixer?
     #if os(macOS)
     private var system: AnyObject?
+    #endif
+    #if DEBUG
+    private var replay: Thread?
     #endif
 
     static func requestMicrophonePermission() async -> Bool {
@@ -54,6 +59,25 @@ final class AudioCapture: @unchecked Sendable {
             self.lock.withLock { _ = self.continuation?.yield(chunk) }
         }
 
+        #if DEBUG
+        // -YuyinReplayWAV <16 kHz wav>: a recording instead of the microphone, at real-time pace.
+        if let path = UserDefaults.standard.string(forKey: "YuyinReplayWAV") {
+            let samples = try WAVFile.read(URL(fileURLWithPath: path))
+            let thread = Thread {
+                let start = DispatchTime.now().uptimeNanoseconds
+                for offset in stride(from: 0, to: samples.count, by: 1600) where !Thread.current.isCancelled {
+                    let end = min(offset + 1600, samples.count)
+                    let due = start + UInt64(end) * 1_000_000_000 / UInt64(AudioSpec.sampleRate)
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if due > now { Thread.sleep(forTimeInterval: Double(due - now) / 1e9) }
+                    emit(Array(samples[offset..<end]))
+                }
+            }
+            replay = thread
+            thread.start()
+            return stream
+        }
+        #endif
         do {
             let both = source.usesMicrophone && source.usesSystemAudio
             let mixer = both ? AudioMixer(emit: emit) : nil
@@ -92,6 +116,10 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func stop() {
+        #if DEBUG
+        replay?.cancel()
+        replay = nil
+        #endif
         microphone?.stop()
         microphone = nil
         #if os(macOS)

@@ -141,4 +141,81 @@ final class SegmenterTests: XCTestCase {
         XCTAssertTrue(starts.contains { abs($0 - 2500) <= 120 }, "\(starts)")
         XCTAssertTrue(starts.contains { abs($0 - 5500) <= 120 }, "\(starts)")
     }
+
+    // MARK: - Voice model
+
+    /// Feeds `samples` with a voice model that hears speech exactly inside `speech` (ms ranges),
+    /// deciding per 512-sample window like Silero.
+    private func runWithVoice(_ samples: [Float], speech: [Range<Int>], chunk: Int,
+                              config: SegmenterConfig = SegmenterConfig()) -> [Segment] {
+        var seg = UtteranceSegmenter(config: config)
+        seg.useVoiceModel()
+        var out: [Segment] = []
+        var position = 0
+        var nextWindowEnd = 512
+        for c in Signal.chunks(samples, size: chunk) {
+            position += c.count
+            var decisions: [VoiceDecision] = []
+            while nextWindowEnd <= position {
+                let ms = AudioSpec.milliseconds(forSamples: nextWindowEnd)
+                decisions.append(VoiceDecision(endSample: nextWindowEnd, isSpeech: speech.contains { $0.contains(ms) }))
+                nextWindowEnd += 512
+            }
+            out += seg.push(c, voice: decisions)
+        }
+        return out
+    }
+
+    /// A room recording: the level never drops (others keep talking, quieter), yet the model
+    /// hears where one sentence ends. The energy VAD sees one long run here.
+    func testVoiceModelSplitsWhereTheLevelNeverDrops() {
+        let audio = Signal.speech(ms: 8_000)
+        let speech = [500..<3_000, 4_000..<6_500]
+        let segments = runWithVoice(audio, speech: speech, chunk: 1600)
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertTrue(segments.allSatisfy { $0.reason == .silence })
+        XCTAssertEqual(AudioSpec.milliseconds(forSamples: segments[0].speechStartSample), 500 - 200, accuracy: 40)
+        XCTAssertEqual(AudioSpec.milliseconds(forSamples: segments[0].speechEndSample), 3_000, accuracy: 40)
+        XCTAssertEqual(AudioSpec.milliseconds(forSamples: segments[1].speechStartSample), 4_000 - 200, accuracy: 40)
+        XCTAssertTrue(run(audio, chunk: 1600).0.isEmpty, "energy VAD: no pause at all")
+    }
+
+    func testVoiceModelHearsSpeechTooQuietForTheEnergyVAD() {
+        let audio = Signal.silence(ms: 500) + Signal.speech(ms: 2_500, amplitude: 0.003) + Signal.silence(ms: 1_500)
+        let segments = runWithVoice(audio, speech: [500..<3_000], chunk: 1600)
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.speechMs ?? 0, 2_500, accuracy: 100)
+        XCTAssertTrue(run(audio, chunk: 1600).0.isEmpty, "energy VAD: below the absolute threshold")
+    }
+
+    /// A long sentence closes at a breath instead of running on to the length cut.
+    func testVoiceModelClosesLongSentencesAtShorterPauses() {
+        let audio = Signal.speech(ms: 12_000)
+        // 300 ms pause after 3 s: too short. 500 ms pause after 7 s: enough for a long sentence.
+        let speech = [0..<3_000, 3_300..<7_000, 7_500..<12_000]
+        let segments = runWithVoice(audio, speech: speech, chunk: 1600)
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(AudioSpec.milliseconds(forSamples: segments[0].speechEndSample), 7_000, accuracy: 40)
+    }
+
+    func testVoiceModelResultIsIndependentOfChunkSize() {
+        let audio = Signal.speech(ms: 9_000)
+        let speech = [300..<2_600, 3_500..<5_200, 6_400..<8_000]
+        let a = runWithVoice(audio, speech: speech, chunk: 160)
+        let b = runWithVoice(audio, speech: speech, chunk: 4096)
+        let c = runWithVoice(audio, speech: speech, chunk: 1000)
+        XCTAssertEqual(a.count, 2)
+        XCTAssertEqual(a, b)
+        XCTAssertEqual(a, c)
+    }
+
+    func testMaxLengthCutPrefersWhereTheModelHearsNoSpeech() {
+        var config = SegmenterConfig()
+        config.maxUtteranceMs = 10_000
+        // Continuous speech with one 200 ms gap at 8.0 s: too short to close, the cut goes there.
+        let audio = Signal.speech(ms: 11_000)
+        let segments = runWithVoice(audio, speech: [0..<8_000, 8_200..<11_000], chunk: 1600, config: config)
+        let cut = try! XCTUnwrap(segments.first { $0.reason == .maxLength })
+        XCTAssertEqual(AudioSpec.milliseconds(forSamples: cut.endSample), 8_100, accuracy: 120)
+    }
 }

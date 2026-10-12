@@ -2,12 +2,14 @@ import Foundation
 import YuyinCore
 
 public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
+    case streamingXASR
     case streamingZipformer
     case senseVoiceANE
     case senseVoice
     case paraformer
     case fireRed
     case qwen3ASR
+    case qwen3ASRLarge
     case funASRNano
     case punctuation
     case speakerEmbedding
@@ -22,13 +24,15 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .streamingZipformer: return "流式 Zipformer（中英）"
+        case .streamingXASR: return "X-ASR 流式（中英，推荐）"
+        case .streamingZipformer: return "流式 Zipformer（中英，旧版）"
         case .senseVoiceANE: return "SenseVoice · 神经网络引擎"
         case .senseVoice: return "SenseVoice · Sherpa"
         case .paraformer: return "Paraformer-large 中文"
         case .fireRed: return "FireRedASR 大模型"
         case .qwen3ASR: return "Qwen3-ASR 0.6B"
-        case .funASRNano: return "Fun-ASR-Nano（推荐）"
+        case .qwen3ASRLarge: return "Qwen3-ASR 1.7B（Mac 推荐）"
+        case .funASRNano: return "Fun-ASR-Nano"
         case .punctuation: return "中文标点"
         case .speakerEmbedding: return "说话人声纹"
         case .speakerSegmentation: return "说话人分割"
@@ -37,10 +41,12 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var role: String {
         switch self {
+        case .streamingXASR: return "实时字幕，自带标点；在法律会议录音上错字比 Zipformer 少约四成"
         case .streamingZipformer: return "实时字幕"
         case .senseVoiceANE, .senseVoice, .fireRed: return "句末纠错"
         case .paraformer: return "句末纠错，纯中文、速度快（英文句自动交给 SenseVoice），自动配标点"
         case .qwen3ASR: return "句末纠错（大模型，口语场景实测一般）"
+        case .qwen3ASRLarge: return "句末纠错，显卡加速；参考上文与专业词汇，法律会议录音上比 Fun-ASR-Nano 更准、快一倍"
         case .funASRNano: return "句末纠错，中文 / 英文 / 中英混说实测最准（大模型）"
         case .punctuation: return "为 Paraformer / FireRed 的结果加标点"
         case .speakerEmbedding: return "标注说话人、重新分析说话人"
@@ -50,6 +56,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
 
     public var approximateSize: String {
         switch self {
+        case .streamingXASR: return "约 130 MB"
         case .streamingZipformer: return "约 490 MB"
         case .senseVoiceANE: return "约 450 MB"
         case .senseVoice: return "约 160 MB"
@@ -57,6 +64,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
         case .fireRed: return "约 1.4 GB"
         case .qwen3ASR: return "约 840 MB"
         case .funASRNano: return "约 800 MB"
+        case .qwen3ASRLarge: return "约 2.8 GB"
         case .punctuation: return "约 62 MB"
         case .speakerEmbedding: return "约 28 MB"
         case .speakerSegmentation: return "约 7 MB"
@@ -67,6 +75,9 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
     public var remoteURL: URL? {
         let base = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
         switch self {
+        case .streamingXASR:
+            // https://github.com/Gilgamesh-J/X-ASR (Apache-2.0); 480 ms chunks: more accurate than 160 ms.
+            return URL(string: base + "asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2")
         case .streamingZipformer:
             return URL(string: base + "asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2")
         case .senseVoice:
@@ -85,20 +96,41 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
             return URL(string: base + "speaker-recongition-models/" + Self.speakerEmbeddingFile)
         case .speakerSegmentation:
             return URL(string: base + "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2")
-        case .senseVoiceANE:
+        case .senseVoiceANE, .qwen3ASRLarge:
             return nil
         }
     }
 
+    /// Models downloaded as plain files rather than one archive; each file lists mirrors in
+    /// the order to try (huggingface.co is unreachable from mainland China).
+    public var remoteFiles: [[URL]]? {
+        switch self {
+        case .qwen3ASRLarge:
+            // https://huggingface.co/mradermacher/Qwen3-ASR-1.7B-GGUF (Qwen3-ASR: Apache-2.0)
+            return [Self.qwen3LargeModelFile, Self.qwen3LargeProjectorFile].map { name in
+                ["https://hf-mirror.com", "https://huggingface.co"].compactMap {
+                    URL(string: "\($0)/mradermacher/Qwen3-ASR-1.7B-GGUF/resolve/main/\(name)")
+                }
+            }
+        default:
+            return nil
+        }
+    }
+
+    static let qwen3LargeModelFile = "Qwen3-ASR-1.7B.Q8_0.gguf"
+    static let qwen3LargeProjectorFile = "Qwen3-ASR-1.7B.mmproj-f16.gguf"
+
     /// Directory names are kept from v0.1 so existing installs keep working.
     var directoryName: String {
         switch self {
+        case .streamingXASR: return "streaming-x-asr-zh-en"
         case .streamingZipformer: return "streaming-zipformer-zh-en"
         case .senseVoice: return "sensevoice-small"
         case .paraformer: return "paraformer-zh"
         case .fireRed: return "firered-asr-large"
         case .qwen3ASR: return "qwen3-asr-0.6b"
         case .funASRNano: return "funasr-nano"
+        case .qwen3ASRLarge: return "qwen3-asr-1.7b-gguf"
         case .punctuation: return "punctuation-zh-en"
         case .speakerEmbedding: return "speaker-embedding"
         case .speakerSegmentation: return "speaker-segmentation"
@@ -164,8 +196,10 @@ public struct ModelLocator: Sendable {
         switch kind {
         case .senseVoiceANE:
             return FluidSenseVoiceCorrector.modelsExist(at: directory(for: kind))
-        case .streamingZipformer:
+        case .streamingXASR, .streamingZipformer:
             return (try? streamingFiles(in: directory(for: kind))) != nil
+        case .qwen3ASRLarge:
+            return (try? ggufFiles(in: directory(for: kind))) != nil
         case .senseVoice, .paraformer, .fireRed, .qwen3ASR, .funASRNano:
             return (try? offlineFiles(kind, in: directory(for: kind))) != nil
         case .speakerEmbedding, .speakerSegmentation, .punctuation:
@@ -174,6 +208,21 @@ public struct ModelLocator: Sendable {
     }
 
     // MARK: - File resolution (also used to validate staged / imported folders)
+
+    /// A llama.cpp model and its audio projector ("*mmproj*.gguf").
+    public func ggufFiles(in dir: URL? = nil) throws -> (model: String, projector: String) {
+        let dir = dir ?? directory(for: .qwen3ASRLarge)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        let ggufs = files.filter { $0.hasSuffix(".gguf") }.sorted()
+        func complete(_ name: String) -> Bool {
+            let size = (try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(name).path)[.size] as? Int) ?? 0
+            return size > 1_000_000
+        }
+        guard let projector = ggufs.first(where: { $0.lowercased().contains("mmproj") && complete($0) }),
+              let model = ggufs.first(where: { !$0.lowercased().contains("mmproj") && complete($0) })
+        else { throw ASRError.modelMissing(ModelKind.qwen3ASRLarge.title) }
+        return (dir.appendingPathComponent(model).path, dir.appendingPathComponent(projector).path)
+    }
 
     public func streamingFiles(in dir: URL? = nil) throws -> StreamingModelFiles {
         let dir = dir ?? directory(for: .streamingZipformer)

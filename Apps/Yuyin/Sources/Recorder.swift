@@ -138,10 +138,23 @@ final class Recorder {
             }
         }
 
+        // Capture first: what is said while the models load (~2 s) waits in the session.
+        do {
+            try startCapture(settings)
+        } catch {
+            errorMessage = error.localizedDescription
+            events?.cancel()
+            sink.close()
+            try? await library.store.delete(id)
+            reset()
+            return
+        }
+
         do {
             try await session.start()
         } catch {
             errorMessage = error.localizedDescription
+            await stopCapture()
             await events?.value
             try? await library.store.delete(id)
             reset()
@@ -151,14 +164,6 @@ final class Recorder {
         // Phase normally follows session events; set it now so the UI never lags the session.
         phase = .listening
         if let draft { await library.save(draft) }
-        do {
-            try startCapture(settings)
-        } catch {
-            errorMessage = error.localizedDescription
-            transitioning = false
-            await stop()
-            return
-        }
         setIdleTimerDisabled(true)
     }
 
@@ -260,8 +265,14 @@ final class Recorder {
             var lastPublish = Date.distantPast
             var silentSince: Date?
             var warned = false
+            #if DEBUG
+            let latency = LatencyLog.shared
+            #endif
             for await chunk in stream {
                 await session.ingest(chunk.samples)
+                #if DEBUG
+                latency?.ingested(captured: chunk.captured)
+                #endif
                 let now = Date()
                 if watchSilence && !warned {
                     // Exact digital silence for a while usually means the permission was denied.
@@ -279,7 +290,18 @@ final class Recorder {
                 if now.timeIntervalSince(lastPublish) > 0.08 {
                     lastPublish = now
                     let elapsed = await session.elapsedMs
-                    await self?.publish(level: chunk.peak, elapsedMs: elapsed)
+                    let peak = chunk.peak
+                    #if DEBUG
+                    let scheduled = DispatchTime.now().uptimeNanoseconds
+                    #endif
+                    // Never wait for the main thread: a busy UI (long transcripts) must not
+                    // hold back recognition, or the live text falls further behind.
+                    Task { @MainActor [weak self] in
+                        #if DEBUG
+                        latency?.mainThread(scheduled: scheduled)
+                        #endif
+                        self?.publish(level: peak, elapsedMs: elapsed)
+                    }
                 }
             }
         }
@@ -387,3 +409,49 @@ final class Recorder {
         #endif
     }
 }
+
+#if DEBUG
+/// -YuyinLatencyLog <path>: once a second, how long audio waited before recognition finished
+/// with it, and how long the main thread took to pick up an update.
+final class LatencyLog: @unchecked Sendable {
+    static let shared: LatencyLog? = UserDefaults.standard.string(forKey: "YuyinLatencyLog").map(LatencyLog.init)
+
+    private let lock = NSLock()
+    private let handle: FileHandle?
+    private let start = DispatchTime.now().uptimeNanoseconds
+    private var lastFlush = DispatchTime.now().uptimeNanoseconds
+    private var ingestMax = 0.0
+    private var mainMax = 0.0
+
+    private init(path: String) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+        handle = FileHandle(forWritingAtPath: path)
+    }
+
+    func ingested(captured: UInt64) {
+        record { $0.ingestMax = max($0.ingestMax, Self.seconds(since: captured)) }
+    }
+
+    func mainThread(scheduled: UInt64) {
+        record { $0.mainMax = max($0.mainMax, Self.seconds(since: scheduled)) }
+    }
+
+    private func record(_ update: (LatencyLog) -> Void) {
+        lock.withLock {
+            update(self)
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now - lastFlush >= 1_000_000_000 else { return }
+            lastFlush = now
+            let line = String(format: "t=%.0fs ingest-lag-max=%.3fs main-lag-max=%.3fs\n",
+                              Double(now - start) / 1e9, ingestMax, mainMax)
+            handle?.write(Data(line.utf8))
+            ingestMax = 0
+            mainMax = 0
+        }
+    }
+
+    private static func seconds(since time: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - time) / 1e9
+    }
+}
+#endif

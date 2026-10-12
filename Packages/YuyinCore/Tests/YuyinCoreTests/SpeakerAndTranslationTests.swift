@@ -125,4 +125,25 @@ final class SpeakerAndTranslationTests: XCTestCase {
         XCTAssertEqual(notices.count, 1)
         XCTAssertTrue(notices[0].hasPrefix("翻译失败"))
     }
+
+    func testSpeakerChangeNeedsTwoDissimilarWindowsAndAMinimumPiece() {
+        var detector = SpeakerChangeDetector()
+        detector.start(at: 0)
+        let hop = AudioSpec.samples(forMilliseconds: 500)
+        let a: [Float] = [1, 0], b: [Float] = [0, 1]
+        // Speaker A for 4 windows, one stray B window, then B for good.
+        let sequence = [a, a, a, a, b, a, b, b, b]
+        var changes: [Int] = []
+        for (i, e) in sequence.enumerated() {
+            if let change = detector.observe(e, windowStart: i * hop) { changes.append(change) }
+        }
+        // The first of the two B windows in a row starts at 6 hops; the change is mid-window.
+        XCTAssertEqual(changes, [6 * hop + AudioSpec.samples(forMilliseconds: 750)])
+
+        var early = SpeakerChangeDetector()
+        early.start(at: 0)
+        XCTAssertNil(early.observe(a, windowStart: 0))
+        XCTAssertNil(early.observe(b, windowStart: 0))
+        XCTAssertNil(early.observe(b, windowStart: 0), "a change 0.75 s in leaves too short a first piece")
+    }
 }

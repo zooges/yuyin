@@ -37,13 +37,14 @@ enum SherpaRuntime {
 
 /// Streaming transducer, configured like k2-fsa `ios-swiftui/SherpaOnnx2Pass`.
 public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendable {
-    public let providerID = "sherpa-zipformer"
+    public let providerID: String
     private let files: StreamingModelFiles
     private let queue = DispatchQueue(label: "app.yuyin.sherpa.streaming", qos: .userInitiated)
     private var recognizer: SherpaOnnxRecognizer?
 
-    public init(files: StreamingModelFiles) {
+    public init(files: StreamingModelFiles, providerID: String = "sherpa-zipformer") {
         self.files = files
+        self.providerID = providerID
     }
 
     public func prepare() async throws {
@@ -95,6 +96,25 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
             recognizer.reset()
             return text
         }
+    }
+
+    public func finishUtterance(keepingUntil seconds: Double) async -> String {
+        await SherpaRuntime.run(on: queue) { [self] in
+            guard let recognizer else { return "" }
+            let result = recognizer.getResult()
+            let tokens = result.tokens, times = result.timestamps
+            recognizer.reset()
+            // Token times count from the last reset, like `seconds`.
+            guard tokens.count == times.count else { return result.text }
+            let kept = zip(tokens, times).prefix { Double($0.1) < seconds }.map(\.0)
+            return kept.count == tokens.count ? result.text : Self.text(of: kept)
+        }
+    }
+
+    /// BPE tokens as sherpa writes them: "▁" starts a word; no spaces next to Chinese.
+    static func text(of tokens: [String]) -> String {
+        TextFilter.tightenChineseSpacing(tokens.joined().replacingOccurrences(of: "▁", with: " "))
+            .trimmingCharacters(in: .whitespaces)
     }
 
     public func shutdown() async {

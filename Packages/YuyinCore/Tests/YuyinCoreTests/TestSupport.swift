@@ -2,9 +2,9 @@ import Foundation
 @testable import YuyinCore
 
 enum Signal {
-    static func tone(ms: Int, amplitude: Float = 0.2) -> [Float] {
+    static func tone(ms: Int, amplitude: Float = 0.2, frequency: Float = 220) -> [Float] {
         let n = AudioSpec.samples(forMilliseconds: ms)
-        return (0..<n).map { i in amplitude * sin(Float(i) * 2 * .pi * 220 / Float(AudioSpec.sampleRate)) }
+        return (0..<n).map { i in amplitude * sin(Float(i) * 2 * .pi * frequency / Float(AudioSpec.sampleRate)) }
     }
 
     /// Speech-like: a tone whose loudness rises and falls ~4 times a second (syllables),
@@ -48,9 +48,11 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
     var textDelayChunks = 0
     private var voicedChunks = 0
     var prepareError: Error?
+    var prepareDelayNanos: UInt64 = 0
     private(set) var shutdownCount = 0
 
     func prepare() async throws {
+        if prepareDelayNanos > 0 { try? await Task.sleep(nanoseconds: prepareDelayNanos) }
         if let prepareError { throw prepareError }
     }
 
@@ -151,4 +153,52 @@ extension TranscriptionSession {
             await ingest(c)
         }
     }
+}
+
+/// Tells "speakers" apart by pitch: below 330 Hz is speaker 0, above is speaker 1.
+final class PitchSpeakerLabeler: SpeakerLabeling, @unchecked Sendable {
+    func prepare(expectedSpeakers: Int) async throws {}
+
+    func assign(_ samples: [Float], speechMs: Int) async throws -> Int? {
+        Self.pitch(samples) < 330 ? 0 : 1
+    }
+
+    func embed(_ samples: [Float]) async -> [Float]? {
+        Self.pitch(samples) < 330 ? [1, 0] : [0, 1]
+    }
+
+    func shutdown() async {}
+
+    /// From the median half-period of the loud parts (background noise crosses zero constantly).
+    static func pitch(_ samples: [Float]) -> Float {
+        let crossings = samples.indices.dropFirst().filter { (samples[$0 - 1] < 0) != (samples[$0] < 0) }
+        let halves = zip(crossings, crossings.dropFirst())
+            .filter { a, b in samples[a..<b].contains { abs($0) > 0.05 } }
+            .map { $1 - $0 }
+            .sorted()
+        guard !halves.isEmpty else { return 0 }
+        return Float(AudioSpec.sampleRate) / Float(2 * halves[halves.count / 2])
+    }
+}
+
+/// Speech wherever a 512-sample window is louder than 0.05 (stands in for Silero).
+final class LevelVoiceDetector: VoiceActivityDetecting, @unchecked Sendable {
+    private var pending: [Float] = []
+    private var position = 0
+
+    func prepare() async throws {}
+
+    func detect(_ samples: [Float]) async -> [VoiceDecision] {
+        pending += samples
+        var out: [VoiceDecision] = []
+        while pending.count >= 512 {
+            let window = Array(pending.prefix(512))
+            pending.removeFirst(512)
+            position += 512
+            out.append(VoiceDecision(endSample: position, isSpeech: AudioSpec.peak(window) > 0.05))
+        }
+        return out
+    }
+
+    func shutdown() async {}
 }

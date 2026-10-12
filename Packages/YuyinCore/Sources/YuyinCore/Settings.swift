@@ -76,6 +76,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// The user's own terms (parties, companies, people): corrected the same way, and given to
     /// recognizers that take hotwords.
     public var vocabulary: [String]
+    /// The user's note on what is being recorded, for recognizers that read context.
+    public var contextNote: String
 
     public init(
         mode: TranscriptMode = .offline,
@@ -90,7 +92,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         audioAppBundleID: String? = nil,
         floatOnTop: Bool = true,
         legalTerms: Bool = true,
-        vocabulary: [String] = []
+        vocabulary: [String] = [],
+        contextNote: String = ""
     ) {
         self.mode = mode
         self.streamingEngine = streamingEngine
@@ -105,6 +108,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.floatOnTop = floatOnTop
         self.legalTerms = legalTerms
         self.vocabulary = vocabulary
+        self.contextNote = contextNote
     }
 
     /// Terms typed by the user, separated by commas, 、, semicolons or line breaks; "错写=正确"
@@ -124,14 +128,17 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     /// What recognizers that read context (Qwen3-ASR 1.7B) are told about the recording: the
-    /// domain and the terms to expect. On the user's legal meeting this got names and terms
-    /// right far more often ("成都航天" 6× vs 2×, "律师" 8× vs 2×).
-    public var recognitionBackground: String? {
-        let terms = TermLexicon(names: vocabulary).hotwords + (legalTerms ? LegalVocabulary.terms : [])
-        var parts: [String] = []
-        if legalTerms { parts.append("这是律师、法务讨论法律事务的会议录音。") }
-        if !terms.isEmpty { parts.append("可能出现的术语：" + terms.joined(separator: "，")) }
-        return parts.isEmpty ? nil : parts.joined()
+    /// domain, the user's note and the terms to expect. On the user's legal meeting this got
+    /// names and terms right far more often ("成都航天" 6× vs 2×, "律师" 8× vs 2×).
+    public var recognitionContext: RecognitionContext? {
+        let note = contextNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = RecognitionContext(
+            domain: legalTerms ? "这是律师、法务讨论法律事务的会议录音。" : nil,
+            note: note.isEmpty ? nil : note,
+            names: TermLexicon(names: vocabulary).hotwords,
+            terms: TermLexicon(terms: legalTerms ? LegalVocabulary.terms : [])
+        )
+        return context.isEmpty ? nil : context
     }
 
     /// Everything the term correction knows for these settings.
@@ -141,7 +148,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case mode, streamingEngine, corrector, silenceMs, maxUtteranceSeconds, speakerLabeling, expectedSpeakers
-        case translation, audioSource, audioAppBundleID, floatOnTop, legalTerms, vocabulary
+        case translation, audioSource, audioAppBundleID, floatOnTop, legalTerms, vocabulary, contextNote
         // v0.1 keys
         case preferSherpaWhenAvailable, preferFireRedCorrector, enableSpeakerLabeling, expectedSpeakerCount
     }
@@ -173,6 +180,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         floatOnTop = (try? c.decodeIfPresent(Bool.self, forKey: .floatOnTop)) ?? defaults.floatOnTop
         legalTerms = (try? c.decodeIfPresent(Bool.self, forKey: .legalTerms)) ?? defaults.legalTerms
         vocabulary = (try? c.decodeIfPresent([String].self, forKey: .vocabulary)) ?? defaults.vocabulary
+        contextNote = (try? c.decodeIfPresent(String.self, forKey: .contextNote)) ?? defaults.contextNote
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -190,6 +198,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try c.encode(floatOnTop, forKey: .floatOnTop)
         try c.encode(legalTerms, forKey: .legalTerms)
         try c.encode(vocabulary, forKey: .vocabulary)
+        try c.encode(contextNote, forKey: .contextNote)
     }
 }
 

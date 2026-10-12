@@ -241,3 +241,45 @@ final class EarlyCorrectionJoinTests: XCTestCase {
     }
 }
 
+final class RelevantTermsTests: XCTestCase {
+    func testTermsAreFoundBySoundInTheLiveText() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms, names: ["作业指导书", "成都航天"])
+        // Live text as X-ASR wrote it in the user's meeting.
+        let terms = lexicon.relevantTerms(in: "我们提供给他的物业制造书，成都行间提了一个备诉")
+        XCTAssertTrue(terms.contains("作业指导书"), "\(terms)")
+        XCTAssertTrue(terms.contains("成都航天"), "\(terms)")
+        XCTAssertLessThanOrEqual(terms.count, 20)
+        XCTAssertFalse(terms.contains("取保候审"), "nothing like it was said: \(terms)")
+    }
+
+    func testExactMentionsComeFirst() {
+        let lexicon = TermLexicon(terms: LegalVocabulary.terms)
+        XCTAssertEqual(lexicon.relevantTerms(in: "这个案件的诉讼时效已经过了", limit: 1), ["诉讼时效"])
+    }
+}
+
+final class RepetitionLoopTests: XCTestCase {
+    /// Qwen3-ASR outputs on the user's meeting.
+    func testLoopsAreFoundAndCollapsed() {
+        let loop = "但是我的理解，它重要的在于我要表示我要解除。除非是你当时你的。除非是你当时你的。除非是你当时你的。除非是你当时你的。"
+        XCTAssertNotNil(TextFilter.repetitionLoop(loop))
+        XCTAssertEqual(TextFilter.collapsingRepetition(loop), "但是我的理解，它重要的在于我要表示我要解除。除非是你当时你的。")
+
+        let twice = "我不说，我就说我要解除。那你这个解除有效吗？我不说，我就说我要解除。那你这个解除有效吗？"
+        XCTAssertNotNil(TextFilter.repetitionLoop(twice))
+        XCTAssertEqual(TextFilter.collapsingRepetition(twice), "我不说，我就说我要解除。那你这个解除有效吗？")
+    }
+
+    func testALongStretchSaidTwiceWithWordsBetweenIsALoop() {
+        let text = "你你提的是迟延，法官不会说，哎，这好像是质量瑕疵。那太多了，审不完。你你提的是迟延，法官不会说，哎，这好像是质量瑕"
+        XCTAssertNotNil(TextFilter.repetitionLoop(text))
+    }
+
+    func testRealSpeechRepetitionIsNotALoop() {
+        for text in ["我我我到底做错了啥？对对对对对。", "这个这个第八个是我们呃沟通过程中", "你提的解除，你提的解除，你要把事由讲清楚。",
+                     "原封原封不动的给了你", "是是是，就只能变成这样"] {
+            XCTAssertNil(TextFilter.repetitionLoop(text), text)
+        }
+    }
+}
+

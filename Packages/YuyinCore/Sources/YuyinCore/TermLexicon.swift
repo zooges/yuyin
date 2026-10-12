@@ -28,8 +28,8 @@ public struct TermLexicon: Sendable {
     /// Longest first, so a longer term wins over a shorter one inside it.
     private let terms: [Term]
     private let rules: [(from: String, to: String)]
-    /// Terms the user means, in their order, for recognizers that take hotwords (rule targets,
-    /// and names with Latin letters too).
+    /// Terms in their order, for recognizers that take hotwords (rule targets, and names with
+    /// Latin letters too). Built-in terms are included only when no names are given.
     public let hotwords: [String]
 
     /// Fuzzy matches need at least this much likeness.
@@ -55,7 +55,7 @@ public struct TermLexicon: Sendable {
             }
             let chars = Array(entry)
             guard (2...16).contains(chars.count), seen.insert(entry).inserted else { continue }
-            if similar { hotwords.append(entry) }
+            if similar || names.isEmpty { hotwords.append(entry) }
             // Only all-Chinese terms: names with Latin letters or digits have no pinyin to match.
             let syllables = chars.compactMap(Syllable.of)
             guard syllables.count == chars.count else { continue }
@@ -139,6 +139,38 @@ public struct TermLexicon: Sendable {
                 + (expected.tone == heard.tone ? 0 : 1)
         }
         return 1 - cost / Double(3 * term.count)
+    }
+
+    /// The terms `text` probably contains, best first: CapsWriter-Offline's hotword retrieval,
+    /// on a first-pass transcript (the live text) instead of its CTC output. A term scores by its
+    /// most alike stretch of the text (same measure as the correction); ≥ `threshold` counts.
+    public func relevantTerms(in text: String, threshold: Double = 0.6, limit: Int = 20) -> [String] {
+        let chars = Array(text)
+        let syllables = chars.map(Syllable.of)
+        let lowered = text.lowercased()
+        var scored: [(term: String, score: Double)] = []
+        for term in terms {
+            let word = String(term.text)
+            if text.contains(word) {
+                scored.append((word, 1))
+                continue
+            }
+            var best = 0.0
+            if term.text.count <= syllables.count {
+                for start in 0...(syllables.count - term.text.count) {
+                    if let score = Self.likeness(term.syllables, syllables[start..<(start + term.text.count)]), score > best {
+                        best = score
+                    }
+                }
+            }
+            if best >= threshold { scored.append((word, best)) }
+        }
+        // Names with Latin letters or digits: by plain text.
+        for word in hotwords where !terms.contains(where: { String($0.text) == word }) && lowered.contains(word.lowercased()) {
+            scored.append((word, 1))
+        }
+        return scored.sorted { $0.score != $1.score ? $0.score > $1.score : $0.term.count > $1.term.count }
+            .prefix(limit).map(\.term)
     }
 
     /// Each character close enough: in 3-character names one part off (or two near pairs),
@@ -233,6 +265,43 @@ struct Syllable: Hashable, Sendable {
         // After j, q, x, y a written "u" is ü.
         if ["j", "q", "x", "y"].contains(initial), final.hasPrefix("u") { final = "v" + final.dropFirst() }
         return Syllable(initial: initial, final: final, tone: tone)
+    }
+}
+
+/// What a recognizer that reads context (Qwen3-ASR 1.7B) is told before each sentence, after
+/// CapsWriter-Offline: the domain, the user's note on the recording, the terms this sentence
+/// probably contains (by sound, from its live text) and the text just before it.
+public struct RecognitionContext: Sendable {
+    public var domain: String?
+    /// The user's own words on the recording ("买卖合同纠纷，原告…，被告成都航天").
+    public var note: String?
+    /// The user's names and rule targets: always given (they are few and case-specific).
+    public var names: [String]
+    /// Built-in terms, of which the relevant ones are given.
+    public var terms: TermLexicon
+    /// false: every term, every time (as before retrieval).
+    public var selectsTerms: Bool
+
+    public init(domain: String?, note: String?, names: [String], terms: TermLexicon, selectsTerms: Bool = true) {
+        self.domain = domain
+        self.note = note
+        self.names = names
+        self.terms = terms
+        self.selectsTerms = selectsTerms
+    }
+
+    public var isEmpty: Bool { domain == nil && (note ?? "").isEmpty && names.isEmpty && terms.isEmpty }
+
+    /// The system prompt for one sentence; `hint` is its live text, `recent` what came before.
+    public func prompt(hint: String, recent: String) -> String? {
+        var parts: [String] = []
+        if let domain { parts.append(domain) }
+        if let note, !note.isEmpty { parts.append("背景：" + note) }
+        let picked = selectsTerms ? terms.relevantTerms(in: hint, limit: 15) : terms.hotwords
+        let all = names + picked.filter { !names.contains($0) }
+        if !all.isEmpty { parts.append("可能出现的术语：" + all.joined(separator: "，")) }
+        if !recent.isEmpty { parts.append("上文：" + recent) }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 }
 

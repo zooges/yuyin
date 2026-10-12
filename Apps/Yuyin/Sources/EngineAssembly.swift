@@ -11,7 +11,7 @@ struct AppEngineProvider: EngineProvider {
     func makeEngines(for settings: AppSettings) async throws -> EngineSet {
         var local = local
         local.hotwords = settings.hotwords
-        local.background = settings.recognitionBackground
+        local.context = settings.recognitionContext
         let labeler = settings.speakerLabeling ? local.makeSpeakerLabeler() : nil
         let translator = makeTranslator(settings)
         let voiceDetector = local.makeVoiceDetector()

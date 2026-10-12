@@ -26,8 +26,8 @@ public struct LocalEngines: Sendable {
     private let onDeviceSpeech: @Sendable () -> Bool
     /// User vocabulary for models that support it (comma-separated).
     public var hotwords: String = ""
-    /// Context for models that read it (Qwen3-ASR 1.7B): the domain and its terms.
-    public var background: String?
+    /// Context for models that read it (Qwen3-ASR 1.7B).
+    public var context: RecognitionContext?
 
     public init(locator: ModelLocator = .standard, onDeviceSpeech: (@Sendable () -> Bool)? = nil) {
         self.locator = locator
@@ -138,10 +138,12 @@ public struct LocalEngines: Sendable {
         case .llamaQwen3:
             #if canImport(llama)
             let files = try locator.ggufFiles()
-            // LLM-based: guard against words invented from noise, like the others.
+            // LLM-based: guard against words invented from noise, like the others; it writes
+            // real stutters ("你你你你") as said, so only longer runs count as invented.
             return GuardedCorrector(
-                primary: LlamaASRCorrector(model: files.model, projector: files.projector, background: background),
-                gate: makeGate()
+                primary: LlamaASRCorrector(model: files.model, projector: files.projector, context: context),
+                gate: makeGate(),
+                maxRun: 6
             )
             #else
             throw ASRError.unavailable("Qwen3-ASR 1.7B 仅支持 Mac")

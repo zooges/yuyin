@@ -11,10 +11,13 @@ public final class GuardedCorrector: CorrectorASREngine, @unchecked Sendable {
     public var providerID: String { primary.providerID }
     private let primary: any CorrectorASREngine
     private var gate: (any CorrectorASREngine)?
+    /// The same character this many times in a row from the primary counts as invented.
+    private let maxRun: Int
 
-    public init(primary: any CorrectorASREngine, gate: (any CorrectorASREngine)?) {
+    public init(primary: any CorrectorASREngine, gate: (any CorrectorASREngine)?, maxRun: Int = 4) {
         self.primary = primary
         self.gate = gate
+        self.maxRun = maxRun
     }
 
     public func prepare() async throws {
@@ -45,7 +48,7 @@ public final class GuardedCorrector: CorrectorASREngine, @unchecked Sendable {
         // A result far shorter than what the live pass heard means the model failed on this
         // audio (e.g. English through a Chinese-only model) — don't let it erase content.
         let lostContent = hintUnits >= 8 && TextFilter.contentUnits(text) * 2 < hintUnits
-        guard TextFilter.looksHallucinated(text) || lostContent else { return text }
+        guard TextFilter.looksHallucinated(text, maxRun: maxRun) || lostContent else { return text }
         if gateText == nil, let gate {
             gateText = try? await gate.correct(samples, hint: hint)
         }
@@ -54,7 +57,7 @@ public final class GuardedCorrector: CorrectorASREngine, @unchecked Sendable {
            TextFilter.contentUnits(fuller) > TextFilter.contentUnits(text) {
             return fuller
         }
-        if TextFilter.looksHallucinated(text) {
+        if TextFilter.looksHallucinated(text, maxRun: maxRun) {
             return candidates.first ?? ""
         }
         return text

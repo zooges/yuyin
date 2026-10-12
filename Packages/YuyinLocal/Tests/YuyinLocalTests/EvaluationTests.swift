@@ -411,9 +411,16 @@ extension EvaluationTests {
         case "funasr-zh": corrector = SherpaOfflineCorrector(kind: .funASRNano, files: try files(.funASRNano, "sherpa-onnx-funasr-nano"),
                                                              hotwords: hotwords, promptLanguage: "中文")
         case "qwen3": corrector = SherpaOfflineCorrector(kind: .qwen3, files: try files(.qwen3ASR, "sherpa-onnx-qwen3-asr"), hotwords: hotwords)
+        case "qwen-raw":
+            // Qwen3-ASR 1.7B without the hallucination guard around it.
+            let files = try std.ggufFiles()
+            corrector = LlamaASRCorrector(model: files.model, projector: files.projector, context: AppSettings().recognitionContext)
         case "production", "qwen-large":
             var local = LocalEngines()
-            local.background = env["YUYIN_EVAL_CONTEXT"] == "0" ? nil : AppSettings().recognitionBackground
+            var context = AppSettings(vocabulary: AppSettings.parseVocabulary(env["YUYIN_EVAL_VOCAB"] ?? ""),
+                                      contextNote: env["YUYIN_EVAL_NOTE"] ?? "").recognitionContext
+            context?.selectsTerms = env["YUYIN_EVAL_TERMS"] != "all"
+            local.context = env["YUYIN_EVAL_CONTEXT"] == "0" ? nil : context
             corrector = try local.makeCorrector(try local.resolveCorrector(name == "production" ? .auto : .qwen3ASRLarge))
         default: corrector = nil
         }
@@ -1311,7 +1318,7 @@ extension EvaluationTests {
         let from = Int((Double(env["YUYIN_EVAL_FROM"] ?? "0") ?? 0) * 16000)
         let audio = Array(all[from..<min(all.count, from + Int((Double(env["YUYIN_EVAL_SECONDS"] ?? "40") ?? 40) * 16000))])
         var local = LocalEngines()
-        local.background = AppSettings().recognitionBackground
+        local.context = AppSettings().recognitionContext
         let session = TranscriptionSession(
             provider: StaticEngines(set: EngineSet(
                 streaming: try local.makeStreaming(local.resolveStreaming(.auto)),

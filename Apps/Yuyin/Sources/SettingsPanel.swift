@@ -268,6 +268,8 @@ private struct RecognitionSettings: View {
             }
             RowDivider()
             VocabularyField()
+            RowDivider()
+            ContextNoteField()
         }
 
         SettingsGroup(title: "断句", footer: "说话慢、常停顿可把「停顿」调大。") {
@@ -279,6 +281,24 @@ private struct RecognitionSettings: View {
                 HUDStepper(text: "\(preferences.settings.maxUtteranceSeconds) 秒", value: $preferences.settings.maxUtteranceSeconds, range: 8...30)
             }
         }
+    }
+}
+
+/// What the recording is about, told to Qwen3-ASR 1.7B before every sentence (CapsWriter's context).
+private struct ContextNoteField: View {
+    @Environment(Preferences.self) private var preferences
+
+    var body: some View {
+        @Bindable var preferences = preferences
+        TextField("", text: $preferences.settings.contextNote,
+                  prompt: Text("背景说明（可选，Qwen3-ASR 会参考）：如 买卖合同纠纷，原告某机械公司，被告成都航天，争议焦点是合同解除").foregroundStyle(Theme.tertiaryText),
+                  axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(Theme.bodyFont)
+            .foregroundStyle(Theme.textPrimary)
+            .lineLimit(1...5)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
     }
 }
 

@@ -180,6 +180,71 @@ public enum TextFilter {
         return out.replacingOccurrences(of: " ,", with: ",").trimmingCharacters(in: .whitespaces)
     }
 
+    /// An LLM recognizer stuck in a loop: a stretch of 12+ characters said twice in a row, of
+    /// 5+ characters three times, or of 16+ characters twice anywhere (punctuation aside).
+    /// Qwen3-ASR wrote "除非是你当时你的。" dozens of times, or a whole sentence twice, on the
+    /// user's meeting. Real speech repeats shorter bits ("我我我", "这个这个", "对对对").
+    public static func repetitionLoop(_ text: String) -> Range<Int>? {
+        let chars = Array(text.filter { $0.isLetter || $0.isNumber })
+        if let run = consecutiveRepeat(chars) { return run.start..<(run.start + run.period * run.copies) }
+        if let copy = repeatedStretch(chars) { return copy.second..<(copy.second + copy.length) }
+        return nil
+    }
+
+    /// Keeps one copy of each looped stretch (the last resort when retries loop too).
+    public static func collapsingRepetition(_ text: String) -> String {
+        var text = text
+        for _ in 0..<10 {
+            let content = text.indices.filter { text[$0].isLetter || text[$0].isNumber }
+            let chars = content.map { text[$0] }
+            func index(_ offset: Int) -> String.Index { offset < content.count ? content[offset] : text.endIndex }
+            if let run = consecutiveRepeat(chars) {
+                text.removeSubrange(index(run.start + run.period)..<index(run.start + run.period * run.copies))
+            } else if let copy = repeatedStretch(chars) {
+                text.removeSubrange(index(copy.second)..<index(copy.second + copy.length))
+            } else {
+                break
+            }
+        }
+        return text
+    }
+
+    private static func consecutiveRepeat(_ chars: [Character]) -> (start: Int, period: Int, copies: Int)? {
+        let n = chars.count
+        guard n >= 10 else { return nil }
+        for period in 5...max(5, min(60, n / 2)) {
+            let needed = period >= 12 ? 2 : 3
+            guard period * needed <= n else { continue }
+            for start in 0...(n - period * needed) {
+                var copies = 1
+                while start + period * (copies + 1) <= n,
+                      chars[(start + period * copies)..<(start + period * (copies + 1))] == chars[start..<(start + period)] {
+                    copies += 1
+                }
+                if copies >= needed { return (start, period, copies) }
+            }
+        }
+        return nil
+    }
+
+    /// A 16+ character stretch that appears again later, with the longest match at the copy.
+    private static func repeatedStretch(_ chars: [Character], length: Int = 16) -> (second: Int, length: Int)? {
+        guard chars.count >= 2 * length else { return nil }
+        var seen: [String: Int] = [:]
+        for start in 0...(chars.count - length) {
+            let key = String(chars[start..<(start + length)])
+            if let first = seen[key], start >= first + length {
+                var matched = length
+                while start + matched < chars.count, chars[first + matched] == chars[start + matched], first + matched < start {
+                    matched += 1
+                }
+                return (start, matched)
+            }
+            if seen[key] == nil { seen[key] = start }
+        }
+        return nil
+    }
+
     /// An early correction of a sentence still being spoken, then the live text heard after it.
     /// The correction ends a little later than the live text it replaced, so the live text
     /// starts by repeating its last words ("…在自己。" + "在自己生产…"), and the corrector closed
@@ -238,14 +303,16 @@ public enum TextFilter {
     /// Typical output of a recognizer fed noise instead of speech: the same character 4+ times
     /// in a row ("这这这这"), a run of stray Latin letters in Chinese text ("g 零 axy x s"),
     /// or Japanese / Korean script.
-    public static func looksHallucinated(_ text: String) -> Bool {
+    /// `maxRun`: this many times the same character in a row counts as invented. Fun-ASR-Nano
+    /// turned a mouse click into "这这这这…"; Qwen3-ASR writes real stutters ("你你你你") as said.
+    public static func looksHallucinated(_ text: String, maxRun: Int = 4) -> Bool {
         if containsForeignScript(text) { return true }
         var run = 1
         var previous: Character?
         for ch in text where !ch.isWhitespace && !ch.isPunctuation {
             if ch == previous {
                 run += 1
-                if run >= 4 { return true }
+                if run >= maxRun { return true }
             } else {
                 run = 1
                 previous = ch

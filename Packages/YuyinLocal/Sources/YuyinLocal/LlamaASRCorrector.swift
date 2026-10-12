@@ -15,8 +15,8 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
 
     private let modelPath: String
     private let projectorPath: String
-    /// Domain and terms, the fixed part of every prompt; nil = no context.
-    private let background: String?
+    /// What every sentence is told; nil = no context.
+    private let prompting: RecognitionContext?
     private let queue = DispatchQueue(label: "app.yuyin.llama", qos: .userInitiated)
     private var model: OpaquePointer?
     private var context: OpaquePointer?
@@ -29,10 +29,10 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
     static let recentLength = 80
     static let maxTokens = 400
 
-    public init(model: String, projector: String, background: String?) {
+    public init(model: String, projector: String, context: RecognitionContext?) {
         modelPath = model
         projectorPath = projector
-        self.background = background
+        prompting = context
     }
 
     deinit {
@@ -87,7 +87,7 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
         guard !samples.isEmpty else { return hint }
         return try await SherpaRuntime.run(on: queue) { [self] in
             guard let model, let context, let media, let sampler else { throw ASRError.notPrepared }
-            let prompt = Self.prompt(system: systemPrompt)
+            let prompt = Self.prompt(system: systemPrompt(hint: hint))
 
             let bitmap = samples.withUnsafeBufferPointer { mtmd_bitmap_init_from_audio($0.count, $0.baseAddress) }
             defer { mtmd_bitmap_free(bitmap) }
@@ -101,24 +101,25 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
             guard tokenized == 0 else { throw ASRError.inferenceFailed("Qwen3-ASR 输入处理失败（\(tokenized)）") }
 
             llama_memory_clear(llama_get_memory(context), true)
-            llama_sampler_reset(sampler)
             var past: llama_pos = 0
             guard mtmd_helper_eval_chunks(media, context, chunks, 0, 0, 2048, true, &past) == 0 else {
                 throw ASRError.inferenceFailed("Qwen3-ASR 音频编码失败")
             }
+            let promptEnd = past
 
-            let vocab = llama_model_get_vocab(model)
-            var bytes: [UInt8] = []
-            var piece = [CChar](repeating: 0, count: 256)
-            for _ in 0..<Self.maxTokens {
-                var token = llama_sampler_sample(sampler, context, -1)
-                if llama_vocab_is_eog(vocab, token) { break }
-                let count = llama_token_to_piece(vocab, token, &piece, Int32(piece.count), 0, false)
-                if count > 0 { bytes += piece[0..<Int(count)].map { UInt8(bitPattern: $0) } }
-                let decoded = withUnsafeMutablePointer(to: &token) { llama_decode(context, llama_batch_get_one($0, 1)) }
-                guard decoded == 0 else { break }
+            // Fast speech needs ~8 tokens a second; a loop would run on to the limit.
+            let seconds = Double(samples.count) / Double(AudioSpec.sampleRate)
+            let budget = min(Self.maxTokens, Int(seconds * 12) + 32)
+            var text = ""
+            // CapsWriter-Offline's circuit breaker: a looping attempt is decoded again with some
+            // randomness (the audio stays encoded; only the generated text is dropped).
+            for (index, temperature) in Self.attemptTemperatures.enumerated() {
+                if index > 0 { _ = llama_memory_seq_rm(llama_get_memory(context), 0, promptEnd, -1) }
+                let attempt = generate(context: context, model: model, budget: budget, temperature: temperature, greedy: sampler)
+                text = Self.transcript(attempt.text)
+                if !attempt.aborted, TextFilter.repetitionLoop(text) == nil { break }
             }
-            let text = Self.transcript(String(decoding: bytes, as: UTF8.self))
+            text = TextFilter.collapsingRepetition(text)
             if remember, !text.isEmpty { recent = String((recent + text).suffix(Self.recentLength)) }
             return text.isEmpty ? hint : text
         }
@@ -128,13 +129,47 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
         await SherpaRuntime.run(on: queue) { [self] in release() }
     }
 
+    static let attemptTemperatures: [Float] = [0, 0.3, 0.6]
+
+    /// Generates until the end token. `aborted`: stopped by the budget or by a loop (the last 30
+    /// tokens are 3 or fewer distinct ones).
+    private func generate(context: OpaquePointer, model: OpaquePointer, budget: Int, temperature: Float,
+                          greedy: UnsafeMutablePointer<llama_sampler>) -> (text: String, aborted: Bool) {
+        var owned: UnsafeMutablePointer<llama_sampler>?
+        if temperature > 0 {
+            let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())
+            llama_sampler_chain_add(chain, llama_sampler_init_top_k(50))
+            llama_sampler_chain_add(chain, llama_sampler_init_top_p(0.95, 1))
+            llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(chain, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
+            owned = chain
+        }
+        defer { if let owned { llama_sampler_free(owned) } }
+        let chain = owned ?? greedy
+        llama_sampler_reset(chain)
+
+        let vocab = llama_model_get_vocab(model)
+        var bytes: [UInt8] = []
+        var tokens: [llama_token] = []
+        var piece = [CChar](repeating: 0, count: 256)
+        for _ in 0..<budget {
+            var token = llama_sampler_sample(chain, context, -1)
+            if llama_vocab_is_eog(vocab, token) { return (String(decoding: bytes, as: UTF8.self), false) }
+            let count = llama_token_to_piece(vocab, token, &piece, Int32(piece.count), 0, false)
+            if count > 0 { bytes += piece[0..<Int(count)].map { UInt8(bitPattern: $0) } }
+            tokens.append(token)
+            if tokens.count >= 30, Set(tokens.suffix(30)).count <= 3 { break }
+            let decoded = withUnsafeMutablePointer(to: &token) { llama_decode(context, llama_batch_get_one($0, 1)) }
+            guard decoded == 0 else { break }
+        }
+        return (String(decoding: bytes, as: UTF8.self), true)
+    }
+
     // MARK: - Prompt
 
-    private var systemPrompt: String? {
-        var parts: [String] = []
-        if let background { parts.append(background) }
-        if !recent.isEmpty { parts.append("上文：" + recent) }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    private func systemPrompt(hint: String) -> String? {
+        if let prompting { return prompting.prompt(hint: hint, recent: recent) }
+        return recent.isEmpty ? nil : "上文：" + recent
     }
 
     /// Qwen3-ASR's chat format as llama-server builds it; the marker becomes the audio.
@@ -147,7 +182,10 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
     /// "language Chinese<asr_text>…" → "…".
     static func transcript(_ output: String) -> String {
         let text = output.range(of: "<asr_text>").map { String(output[$0.upperBound...]) } ?? output
-        return text.replacingOccurrences(of: "<|im_end|>", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.replacingOccurrences(of: "<|im_end|>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .drop { "。，、；：？！.,;:?!".contains($0) || $0.isWhitespace }
+            .description
     }
 
     // MARK: - Lifecycle

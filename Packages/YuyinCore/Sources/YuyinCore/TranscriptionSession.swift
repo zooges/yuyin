@@ -549,6 +549,8 @@ public actor TranscriptionSession {
         text = lexicon.correct(TextFilter.tightenChineseSpacing(
             TextFilter.normalizeCase(TextFilter.normalizePunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines)))
         ))
+        // Some models start a clip that begins mid-pause with "。".
+        text = String(text.drop { "。，、；：？！.,;:?!".contains($0) || $0.isWhitespace })
         let heard = failure == nil ? TextFilter.isMeaningful(text) : TextFilter.isMeaningful(job.hint)
 
         // Only real speech is clustered: a click that recognizes as nothing must not

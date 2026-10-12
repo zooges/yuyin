@@ -1332,3 +1332,68 @@ extension EvaluationTests {
         #endif
     }
 }
+
+extension EvaluationTests {
+    /// CPU time vs latency of the always-running ONNX models (live captions, speaker embedding)
+    /// per thread count and onnxruntime spin-waiting, fed with gaps like real-time audio.
+    ///
+    ///     YUYIN_EVAL_WAV=<wav> swift test --filter EvaluationTests/testThreadingCost
+    func testThreadingCost() throws {
+        let audio = Array(try WAVFile.read(try XCTUnwrap(wav)).prefix(16000 * 40))
+        let noSpin = FileManager.default.temporaryDirectory.appendingPathComponent("yuyin-eval-nospin.cfg")
+        try "SessionConfig.session.intra_op.allow_spinning=0\nSessionConfig.session.inter_op.allow_spinning=0\n"
+            .write(to: noSpin, atomically: true, encoding: .utf8)
+        func cpuSeconds() -> Double {
+            var usage = rusage()
+            getrusage(RUSAGE_SELF, &usage)
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+        }
+        func report(_ label: String, _ times: [Double], cpu: Double, audioSeconds: Double) {
+            let sorted = times.sorted()
+            print(String(format: "%@  per call avg %.1f ms  p95 %.1f ms  max %.1f ms  CPU %.0f%% of a core",
+                         label, sorted.reduce(0, +) / Double(sorted.count) * 1000, sorted[sorted.count * 95 / 100] * 1000,
+                         sorted.last! * 1000, cpu / audioSeconds * 100))
+        }
+        let configs: [(String, Int, String)] = [("4 threads spin  ", 4, "cpu"), ("4 threads nospin", 4, "cpu:" + noSpin.path),
+                                                ("2 threads nospin", 2, "cpu:" + noSpin.path), ("1 thread        ", 1, "cpu")]
+        let files = try ModelLocator.standard.streamingFiles()
+        for (label, threads, provider) in configs {
+            var config = sherpaOnnxOnlineRecognizerConfig(
+                featConfig: sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80),
+                modelConfig: sherpaOnnxOnlineModelConfig(
+                    tokens: files.tokens,
+                    transducer: sherpaOnnxOnlineTransducerModelConfig(encoder: files.encoder, decoder: files.decoder, joiner: files.joiner),
+                    numThreads: threads, provider: provider, modelType: ""),
+                decodingMethod: "greedy_search")
+            let recognizer = SherpaOnnxRecognizer(config: &config)
+            var times: [Double] = []
+            let cpu0 = cpuSeconds()
+            for start in stride(from: 0, to: audio.count, by: 1600) {
+                let t0 = Date()
+                recognizer.acceptWaveform(samples: Array(audio[start..<min(start + 1600, audio.count)]))
+                while recognizer.isReady() { recognizer.decode() }
+                _ = recognizer.getResult().text
+                times.append(Date().timeIntervalSince(t0))
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            report("X-ASR   \(label)", times, cpu: cpuSeconds() - cpu0, audioSeconds: Double(times.count) * 0.02 + times.reduce(0, +))
+        }
+        let model = try ModelLocator.standard.singleModel(.speakerEmbedding)
+        for (label, threads, provider) in configs {
+            var config = sherpaOnnxSpeakerEmbeddingExtractorConfig(model: model, numThreads: threads, provider: provider)
+            let extractor = SherpaOnnxSpeakerEmbeddingExtractorWrapper(config: &config)
+            var times: [Double] = []
+            let cpu0 = cpuSeconds()
+            for start in stride(from: 0, to: audio.count - 24000, by: 8000) {
+                let t0 = Date()
+                let stream = extractor.createStream()
+                stream.acceptWaveform(samples: Array(audio[start..<(start + 24000)]), sampleRate: 16000)
+                stream.inputFinished()
+                if extractor.isReady(stream: stream) { _ = extractor.compute(stream: stream) }
+                times.append(Date().timeIntervalSince(t0))
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            report("CAM++   \(label)", times, cpu: cpuSeconds() - cpu0, audioSeconds: Double(times.count) * 0.05 + times.reduce(0, +))
+        }
+    }
+}

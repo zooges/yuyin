@@ -9,6 +9,20 @@ enum SherpaRuntime {
         min(4, max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
     }
 
+    /// For the models that run all through a recording (live captions, speaker changes): on
+    /// 100 ms chunks one thread was as fast as four (~7 ms a chunk) at a seventh of the CPU.
+    static let liveThreads = 1
+
+    /// onnxruntime's worker threads spin-wait after every run. While recording, that busy
+    /// waiting was most of the app's CPU (~80% of a core in all). `cpu:<file>` hands session
+    /// options to onnxruntime through sherpa-onnx.
+    static let provider: String = {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("yuyin-onnxruntime.cfg")
+        let options = "SessionConfig.session.intra_op.allow_spinning=0\nSessionConfig.session.inter_op.allow_spinning=0\n"
+        guard (try? options.write(to: file, atomically: true, encoding: .utf8)) != nil else { return "cpu" }
+        return "cpu:" + file.path
+    }()
+
     static func run<T>(on queue: DispatchQueue, _ body: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
             queue.async {
@@ -60,7 +74,8 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
                     decoder: files.decoder,
                     joiner: files.joiner
                 ),
-                numThreads: SherpaRuntime.threads,
+                numThreads: SherpaRuntime.liveThreads,
+                provider: SherpaRuntime.provider,
                 modelType: ""
             )
             var config = sherpaOnnxOnlineRecognizerConfig(
@@ -176,6 +191,7 @@ public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendab
                 let modelConfig = sherpaOnnxOfflineModelConfig(
                     tokens: files.tokens,
                     numThreads: SherpaRuntime.threads,
+                    provider: SherpaRuntime.provider,
                     senseVoice: sherpaOnnxOfflineSenseVoiceModelConfig(
                         model: model,
                         language: language,
@@ -189,6 +205,7 @@ public final class SherpaOfflineCorrector: CorrectorASREngine, @unchecked Sendab
                     tokens: files.tokens,
                     paraformer: sherpaOnnxOfflineParaformerModelConfig(model: model),
                     numThreads: SherpaRuntime.threads,
+                    provider: SherpaRuntime.provider,
                     modelType: "paraformer"
                 )
                 var config = sherpaOnnxOfflineRecognizerConfig(featConfig: feat, modelConfig: modelConfig)

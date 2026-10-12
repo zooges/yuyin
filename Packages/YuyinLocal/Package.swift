@@ -12,7 +12,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../YuyinCore"),
-        // https://github.com/k2-fsa/sherpa-onnx — streaming Zipformer, offline SenseVoice/Paraformer/FireRed, speaker models
+        // https://github.com/k2-fsa/sherpa-onnx — streaming X-ASR, offline SenseVoice/Paraformer, speaker embedding
         .package(url: "https://github.com/k2-fsa/sherpa-onnx.git", from: "1.13.8"),
         // https://github.com/FluidInference/FluidAudio — CoreML SenseVoice on the Neural Engine
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.17.0"),

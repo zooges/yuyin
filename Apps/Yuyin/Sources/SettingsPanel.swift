@@ -186,9 +186,7 @@ private struct GeneralSettings: View {
                 }
                 if OnDeviceTranslation.isAvailable && preferences.settings.translation.engine != .cloud {
                     RowDivider()
-                    SettingsRow(title: "离线翻译语言", detail: "首次使用需下载") {
-                        PrepareTranslationButton(target: preferences.settings.translation.target)
-                    }
+                    TranslationLanguagesRow(target: preferences.settings.translation.target)
                 }
             }
         }

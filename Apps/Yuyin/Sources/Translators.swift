@@ -76,51 +76,106 @@ enum OnDeviceTranslation {
         if #available(macOS 26.0, iOS 26.0, *) { return true }
         return false
     }
+
+    /// The directions sentences take for this target (source, target).
+    static func directions(for target: TranslationTarget) -> [(String, String)] {
+        switch target {
+        case .auto: return [("zh", "en"), ("en", "zh")]
+        case .zh: return [("en", "zh")]
+        case .en: return [("zh", "en")]
+        case .ja, .ko: return [("zh", target.rawValue), ("en", target.rawValue)]
+        }
+    }
+
+    enum Readiness: Equatable {
+        case installed
+        /// This direction still has to be downloaded.
+        case needsDownload(source: String, target: String)
+        case unsupported
+    }
+
+    @available(macOS 15.0, iOS 18.0, *)
+    static func readiness(for target: TranslationTarget) async -> Readiness {
+        let availability = LanguageAvailability()
+        for (source, destination) in directions(for: target) {
+            switch await availability.status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: destination)) {
+            case .installed: continue
+            case .supported: return .needsDownload(source: source, target: destination)
+            case .unsupported: return .unsupported
+            @unknown default: return .unsupported
+            }
+        }
+        return .installed
+    }
 }
 
-/// Button that triggers the system's language download sheet for on-device translation.
-struct PrepareTranslationButton: View {
+/// Whether the on-device languages for the target are downloaded, with the system's download
+/// sheet for the missing ones.
+struct TranslationLanguagesRow: View {
     let target: TranslationTarget
+    @State private var readiness: OnDeviceTranslation.Readiness?
     @State private var trigger = false
-    @State private var status: String?
+    @State private var error: String?
 
     var body: some View {
         if #available(macOS 15.0, iOS 18.0, *) {
-            HStack {
-                Button("下载") { trigger.toggle() }.buttonStyle(.hud(.secondary))
-                if let status {
-                    Text(status).font(Theme.metaFont).foregroundStyle(Theme.secondaryText)
+            SettingsRow(title: "离线翻译语言", detail: detail) {
+                if readiness == .installed {
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color(red: 0.45, green: 0.85, blue: 0.6))
+                        .padding(.trailing, 6)
+                } else if case .needsDownload = readiness {
+                    Button("下载") { trigger.toggle() }.buttonStyle(.hud(.secondary))
                 }
             }
-            .modifier(PrepareModifier(target: target, trigger: trigger) { status = $0 })
+            .modifier(PrepareModifier(readiness: readiness, trigger: trigger) { failure in
+                error = failure
+                Task { readiness = await OnDeviceTranslation.readiness(for: target) }
+            })
+            .task(id: target) {
+                error = nil
+                readiness = await OnDeviceTranslation.readiness(for: target)
+            }
+        }
+    }
+
+    private var detail: String {
+        if let error { return error }
+        switch readiness {
+        case .installed: return "已下载，可离线翻译"
+        case .needsDownload: return "首次使用需下载"
+        case .unsupported: return "系统翻译不支持该语言"
+        case nil: return "正在检查…"
         }
     }
 }
 
 @available(macOS 15.0, iOS 18.0, *)
 private struct PrepareModifier: ViewModifier {
-    let target: TranslationTarget
+    let readiness: OnDeviceTranslation.Readiness?
     let trigger: Bool
-    let report: (String) -> Void
+    /// After the sheet: nil when it went through, else the error.
+    let done: (String?) -> Void
     @State private var configuration: TranslationSession.Configuration?
 
     func body(content: Content) -> some View {
         content
             .onChange(of: trigger) { _, _ in
-                let destination = target == .auto ? "en" : target.rawValue
-                let source = destination == "zh" ? "en" : "zh"
-                if configuration == nil {
-                    configuration = .init(source: Locale.Language(identifier: source), target: Locale.Language(identifier: destination))
-                } else {
+                guard case .needsDownload(let source, let target) = readiness else { return }
+                let wanted = TranslationSession.Configuration(source: Locale.Language(identifier: source),
+                                                              target: Locale.Language(identifier: target))
+                if configuration?.source == wanted.source && configuration?.target == wanted.target {
                     configuration?.invalidate()
+                } else {
+                    configuration = wanted
                 }
             }
             .translationTask(configuration) { session in
                 do {
                     try await session.prepareTranslation()
-                    report("已就绪")
+                    done(nil)
                 } catch {
-                    report(error.localizedDescription)
+                    done(error.localizedDescription)
                 }
             }
     }

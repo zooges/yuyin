@@ -172,9 +172,10 @@ public struct LocalEngines: Sendable {
         return nil
     }
 
-    public func makeSpeakerLabeler() -> (any SpeakerLabeling)? {
+    /// `wholeRecording`: for re-analysing a saved recording, where more threads finish sooner.
+    public func makeSpeakerLabeler(wholeRecording: Bool = false) -> (any SpeakerLabeling)? {
         guard let model = try? locator.singleModel(.speakerEmbedding) else { return nil }
-        return SherpaSpeakerLabeler(model: model)
+        return SherpaSpeakerLabeler(model: model, threads: wholeRecording ? SherpaRuntime.threads : SherpaRuntime.liveThreads)
     }
 
     /// The bundled Silero VAD; used in every mode, since segmentation always runs on device.

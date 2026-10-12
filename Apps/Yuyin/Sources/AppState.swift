@@ -263,7 +263,7 @@ final class MeetingLibrary {
     /// (95.7% / 90.1% vs 61–91% speaker accuracy) and fixes recordings made before v0.8.
     func analyzeSpeakers(_ id: UUID, engines: LocalEngines, expectedSpeakers: Int) async throws -> Int {
         guard let original = meeting(id) else { return 0 }
-        guard let labeler = engines.makeSpeakerLabeler() else { throw ASRError.modelMissing("说话人声纹") }
+        guard let labeler = engines.makeSpeakerLabeler(wholeRecording: true) else { throw ASRError.modelMissing("说话人声纹") }
         let url = store.audioURL(for: id)
         try await labeler.prepare(expectedSpeakers: expectedSpeakers)
         var map: [UUID: Int?] = [:]

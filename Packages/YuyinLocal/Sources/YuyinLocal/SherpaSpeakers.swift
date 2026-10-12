@@ -9,18 +9,22 @@ public final class SherpaSpeakerLabeler: SpeakerLabeling, @unchecked Sendable {
     private var extractor: SherpaOnnxSpeakerEmbeddingExtractorWrapper?
     private let baseClusterer: OnlineSpeakerClusterer
     private var clusterer: OnlineSpeakerClusterer
+    private let threads: Int
 
-    public init(model: String, clusterer: OnlineSpeakerClusterer = OnlineSpeakerClusterer()) {
+    /// `threads`: 1 while recording (two short windows a second); more for re-analysing a
+    /// whole recording.
+    public init(model: String, clusterer: OnlineSpeakerClusterer = OnlineSpeakerClusterer(), threads: Int = 1) {
         self.model = model
         baseClusterer = clusterer
         self.clusterer = clusterer
+        self.threads = threads
     }
 
     public func prepare(expectedSpeakers: Int) async throws {
         let model = model
         try await SherpaRuntime.run(on: queue) { [self] in
             try SherpaRuntime.checkFiles([model], model: "speaker-embedding")
-            var config = sherpaOnnxSpeakerEmbeddingExtractorConfig(model: model, numThreads: SherpaRuntime.threads)
+            var config = sherpaOnnxSpeakerEmbeddingExtractorConfig(model: model, numThreads: threads, provider: SherpaRuntime.provider)
             extractor = SherpaOnnxSpeakerEmbeddingExtractorWrapper(config: &config)
             clusterer = baseClusterer
             clusterer.maxSpeakers = max(0, expectedSpeakers)

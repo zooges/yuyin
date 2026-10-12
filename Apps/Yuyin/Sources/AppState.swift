@@ -205,6 +205,47 @@ final class MeetingLibrary {
         await save(meeting)
     }
 
+    // MARK: - 润色
+
+    /// The recording being polished and how far along (0…1).
+    private(set) var polishing: (id: UUID, progress: Double)?
+    private var polishTask: Task<Void, Never>?
+
+    /// Rewrites a recording as a clean written record with the local chat model; the original
+    /// text stays, the result goes to `Utterance.polished`.
+    func polish(_ id: UUID, engines: LocalEngines, settings: AppSettings) {
+        guard polishing == nil, let meeting = meeting(id) else { return }
+        polishing = (id, 0)
+        polishTask = Task { [weak self] in
+            do {
+                let model = try engines.makePolisher()
+                try await model.prepare()
+                defer { Task { await model.shutdown() } }
+                let context = settings.recognitionContext
+                let texts = try await TranscriptPolish.run(
+                    meeting.utterances.sorted { $0.startMs < $1.startMs }, book: meeting.speakerBook, model: model,
+                    background: context?.note, terms: (context?.names ?? []) + LegalVocabulary.terms.prefix(settings.legalTerms ? 40 : 0)
+                ) { fraction in
+                    Task { @MainActor in self?.polishing = (id, fraction) }
+                }
+                guard let self, var latest = self.meeting(id) else { return }
+                for index in latest.utterances.indices {
+                    latest.utterances[index].polished = texts[latest.utterances[index].id]
+                }
+                await self.save(latest)
+            } catch is CancellationError {
+            } catch {
+                self?.lastError = "润色失败：\(error.localizedDescription)"
+            }
+            self?.polishing = nil
+            self?.polishTask = nil
+        }
+    }
+
+    func cancelPolish() {
+        polishTask?.cancel()
+    }
+
     func delete(_ id: UUID) async {
         meetings.removeAll { $0.id == id }
         interrupted.remove(id)

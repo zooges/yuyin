@@ -137,7 +137,7 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
         if let mode = UserDefaults.standard.string(forKey: "YuyinDemo") {
             Task { await container.recorder.loadDemo(mode, library: container.library) }
         }
-        if let path = UserDefaults.standard.string(forKey: "YuyinSnapshot") {
+        if let path = UserDefaults.standard.string(forKey: "YuyinSnapshot"), UserDefaults.standard.string(forKey: "YuyinPolishDemo") == nil {
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 panel.snapshot(to: URL(fileURLWithPath: path))
@@ -168,6 +168,26 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 await container.recorder.start(preferences: container.preferences, models: container.models)
                 try? await Task.sleep(for: .seconds(seconds))
                 if let id = await container.recorder.stop() { await container.library.delete(id) }
+                NSApp.terminate(nil)
+            }
+        }
+        // -YuyinPolishDemo <meeting id> -YuyinSnapshot <png>: polishes a copy of that recording in
+        // its detail card, snapshots it, then deletes the copy.
+        if let source = UserDefaults.standard.string(forKey: "YuyinPolishDemo").flatMap(UUID.init(uuidString:)),
+           let path = UserDefaults.standard.string(forKey: "YuyinSnapshot") {
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                guard var copy = container.library.meeting(source) else { NSApp.terminate(nil); return }
+                copy = Meeting(id: UUID(), title: copy.title + "（润色测试）", createdAt: copy.createdAt, mode: copy.mode,
+                               utterances: copy.utterances, speakerNames: copy.speakerNames, durationMs: copy.durationMs)
+                await container.library.save(copy)
+                container.navigation.panel = .history
+                container.navigation.historyMeeting = copy.id
+                container.library.polish(copy.id, engines: container.models.engines, settings: container.preferences.settings)
+                while container.library.polishing != nil { try? await Task.sleep(for: .milliseconds(300)) }
+                try? await Task.sleep(for: .seconds(1))
+                panel.snapshot(to: URL(fileURLWithPath: path))
+                await container.library.delete(copy.id)
                 NSApp.terminate(nil)
             }
         }

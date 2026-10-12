@@ -337,6 +337,7 @@ private struct ModelSettings: View {
         ("句末纠错", (LocalEngines.supportsLlama ? [.qwen3ASRLarge] : [])
             + [.funASRNano, .paraformer, .senseVoiceANE, .senseVoice, .fireRed, .qwen3ASR, .punctuation]),
         ("多人", [.speakerEmbedding]),
+        ("润色", LocalEngines.supportsLlama ? [.polishModel] : []),
     ]
 
     var body: some View {

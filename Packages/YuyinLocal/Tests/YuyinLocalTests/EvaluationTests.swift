@@ -1350,3 +1350,41 @@ extension EvaluationTests {
         if let out = env["YUYIN_EVAL_OUT"] { try lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8) }
     }
 }
+
+extension EvaluationTests {
+    /// 润色 on a saved recording: YUYIN_EVAL_MEETING=<folder> [YUYIN_EVAL_POLISH_MODEL=<gguf>]
+    /// [YUYIN_EVAL_FROM=<s>] [YUYIN_EVAL_SECONDS=<s>] YUYIN_EVAL_OUT=<txt>: before / after per sentence.
+    func testPolishMeeting() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let dir = URL(fileURLWithPath: try XCTUnwrap(env["YUYIN_EVAL_MEETING"]))
+        let meeting = try JSONDecoder().decode(Meeting.self, from: Data(contentsOf: dir.appendingPathComponent("meeting.json")))
+        let from = Int((Double(env["YUYIN_EVAL_FROM"] ?? "0") ?? 0) * 1000)
+        let to = from + Int((Double(env["YUYIN_EVAL_SECONDS"] ?? "300") ?? 300) * 1000)
+        let utterances = meeting.utterances.filter { $0.startMs >= from && $0.startMs < to }
+        #if canImport(llama)
+        let model = LlamaChatModel(model: try env["YUYIN_EVAL_POLISH_MODEL"] ?? ModelLocator.standard.polishModelFile())
+        try await model.prepare()
+        if let raw = env["YUYIN_EVAL_POLISH_RAW"],
+           let first = TranscriptPolish.batches(TranscriptPolish.paragraphs(utterances, book: meeting.speakerBook)).first {
+            let answer = try await model.complete(system: TranscriptPolish.system(background: nil, terms: []),
+                                                  user: TranscriptPolish.user(first), maxTokens: 2000)
+            try "\(first.count) paragraphs\n---\n\(answer)".write(toFile: raw, atomically: true, encoding: .utf8)
+        }
+        let t0 = Date()
+        let settings = AppSettings()
+        let polished = try await TranscriptPolish.run(
+            utterances, book: meeting.speakerBook, model: model,
+            background: settings.contextNote, terms: LegalVocabulary.terms.prefix(40).map { $0 }
+        ) { _ in }
+        let seconds = Date().timeIntervalSince(t0)
+        let paragraphs = TranscriptPolish.paragraphs(utterances, book: meeting.speakerBook)
+        var lines = paragraphs.map { p in "【\(p.speaker ?? "-")】原文：\(p.text)\n润色：\(polished[p.ids[0]] ?? "（保留原文）")\n" }
+        let chars = utterances.reduce(0) { $0 + $1.displayText.count }
+        lines.append(String(format: "POLISH %d paragraphs, %d chars in %.1fs (%.0f chars/s); %d polished, %d kept as said",
+                            paragraphs.count, chars, seconds, Double(chars) / seconds,
+                            paragraphs.filter { polished[$0.ids[0]] != nil }.count, paragraphs.filter { polished[$0.ids[0]] == nil }.count))
+        try lines.joined(separator: "\n").write(toFile: try XCTUnwrap(env["YUYIN_EVAL_OUT"]), atomically: true, encoding: .utf8)
+        await model.shutdown()
+        #endif
+    }
+}

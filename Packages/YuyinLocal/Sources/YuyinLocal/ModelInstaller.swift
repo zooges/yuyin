@@ -218,6 +218,8 @@ public actor ModelInstaller {
         switch kind {
         case .qwen3ASRLarge:
             return (try? locator.ggufFiles(in: dir)) != nil
+        case .polishModel:
+            return (try? locator.polishModelFile(in: dir)) != nil
         case .streamingXASRFast, .streamingXASR, .streamingZipformer:
             guard let files = try? locator.streamingFiles(in: dir) else { return false }
             return !shallow || URL(fileURLWithPath: files.tokens).deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL

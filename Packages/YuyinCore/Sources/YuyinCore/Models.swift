@@ -51,6 +51,8 @@ public struct Utterance: Identifiable, Codable, Equatable, Sendable {
     public var speakerIndex: Int?
     /// Translation of the final text (when live translation is on).
     public var translation: String?
+    /// The sentence as a clean written record (fillers and stutters gone), from 润色.
+    public var polished: String?
 
     public init(
         id: UUID = UUID(),
@@ -88,6 +90,7 @@ public struct Utterance: Identifiable, Codable, Equatable, Sendable {
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         speakerIndex = try c.decodeIfPresent(Int.self, forKey: .speakerIndex)
         translation = try c.decodeIfPresent(String.self, forKey: .translation)
+        polished = try c.decodeIfPresent(String.self, forKey: .polished)
     }
 
     public var displayText: String {
@@ -243,6 +246,21 @@ public enum TextFilter {
             if seen[key] == nil { seen[key] = start }
         }
         return nil
+    }
+
+    /// The safe part of 润色, by rule: "呃" / "嗯" gone, a character said three or more times in
+    /// a row once ("我我我"), and common filler words said twice or more once ("这个这个").
+    /// Reduplicated words ("常常", "看看", "一个一个") stay.
+    public static func removingFillers(_ text: String) -> String {
+        var out = text.replacingOccurrences(of: #"[呃嗯额][，,、]?"#, with: "", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"(\p{Han})\1{2,}"#, with: "$1", options: .regularExpression)
+        for word in ["这个", "那个", "就是", "然后", "所以", "但是", "我们", "他们", "你们", "这样", "那么"] {
+            out = out.replacingOccurrences(of: "(\(word))(?:[，,]?\(word))+", with: "$1", options: .regularExpression)
+        }
+        out = out.replacingOccurrences(of: #"([。？！])[。，,、]+"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"，[，,]+"#, with: "，", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"^[，,。、\s]+"#, with: "", options: .regularExpression)
+        return out
     }
 
     /// An early correction of a sentence still being spoken, then the live text heard after it.

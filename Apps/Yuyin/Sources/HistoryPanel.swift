@@ -1,5 +1,6 @@
 import SwiftUI
 import YuyinCore
+import YuyinLocal
 
 /// "录音记录" card: list → detail, all inside the drop-down.
 struct HistoryPanel: View {
@@ -117,6 +118,14 @@ private struct MeetingRow: View {
     }
 }
 
+private enum TranscriptVersion: String, CaseIterable, Identifiable {
+    case polished
+    case original
+
+    var id: String { rawValue }
+    var title: String { self == .polished ? "润色稿" : "原文" }
+}
+
 private struct MeetingDetailCard: View {
     let meeting: Meeting
     @Environment(Navigation.self) private var navigation
@@ -132,6 +141,10 @@ private struct MeetingDetailCard: View {
     @State private var confirmingDelete = false
     @State private var analyzing = false
     @State private var message: String?
+    /// Show the 润色 text where there is one.
+    @State private var version = TranscriptVersion.polished
+
+    private var hasPolished: Bool { meeting.utterances.contains { $0.polished != nil } }
 
     private var book: SpeakerBook { meeting.speakerBook }
 
@@ -148,6 +161,15 @@ private struct MeetingDetailCard: View {
                     || (u.translation?.localizedCaseInsensitiveContains(search) ?? false)
             }
             .sorted { $0.startMs < $1.startMs }
+            // In the 润色 text, a sentence merged into the one before ("") is not shown.
+            .filter { version == .original || $0.polished != "" }
+            .map { u in
+                guard version == .polished, let polished = u.polished else { return u }
+                var shown = u
+                shown.finalText = polished
+                shown.status = .final
+                return shown
+            }
     }
 
     var body: some View {
@@ -162,6 +184,13 @@ private struct MeetingDetailCard: View {
                     Button("重命名") {
                         newTitle = meeting.title
                         renaming = true
+                    }
+                    if LocalEngines.supportsLlama {
+                        Button(models.installed.contains(.polishModel)
+                               ? (hasPolished ? "重新润色" : "润色（整理成书面记录）") : "润色（需下载润色模型）") {
+                            startPolish()
+                        }
+                        .disabled(library.polishing != nil)
                     }
                     Button(models.engines.canLabelSpeakers ? "重新分析说话人" : "重新分析说话人（需下载说话人声纹模型）") {
                         Task { await analyze() }
@@ -205,6 +234,17 @@ private struct MeetingDetailCard: View {
             }
             if let message {
                 MessageRow(text: message) { self.message = nil }
+            }
+            if let polishing = library.polishing, polishing.id == meeting.id {
+                HStack(spacing: 8) {
+                    ProgressView(value: polishing.progress).controlSize(.small).tint(Theme.secondaryText).frame(width: 80)
+                    Text("正在润色… \(Int(polishing.progress * 100))%").font(Theme.metaFont).foregroundStyle(Theme.secondaryText)
+                    Spacer()
+                    Button("取消") { library.cancelPolish() }.buttonStyle(.hud(.quiet))
+                }
+            }
+            if hasPolished {
+                TabSwitcher(tabs: TranscriptVersion.allCases, selection: $version) { $0.title }
             }
             if analyzing {
                 HStack(spacing: 8) {
@@ -284,6 +324,15 @@ private struct MeetingDetailCard: View {
         var parts = [Format.date(meeting.createdAt), Format.duration(meeting.durationMs), "\(meeting.utterances.count) 句"]
         if library.interrupted.contains(meeting.id) { parts.append("曾意外中断") }
         return parts.joined(separator: " · ")
+    }
+
+    private func startPolish() {
+        guard models.installed.contains(.polishModel) else {
+            message = "请先在 设置 → 模型 中下载「润色模型」（约 2.5 GB，本机运行，内容不上传）"
+            return
+        }
+        version = .polished
+        library.polish(meeting.id, engines: models.engines, settings: preferences.settings)
     }
 
     private func saveTitle() {

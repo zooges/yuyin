@@ -15,6 +15,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
     case punctuation
     case speakerEmbedding
     case speakerSegmentation
+    case polishModel
 
     /// CAM++ (zh/en, 3D-Speaker). On two AMI meetings, live speaker accuracy was 95.7% / 90.1%,
     /// against 92.4% / 81.2% for the ERes2Net model used before; it also separated the speakers
@@ -38,6 +39,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
         case .punctuation: return "中文标点"
         case .speakerEmbedding: return "说话人声纹"
         case .speakerSegmentation: return "说话人分割"
+        case .polishModel: return "润色模型 Qwen3-4B"
         }
     }
 
@@ -54,6 +56,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
         case .punctuation: return "为 Paraformer / FireRed 的结果加标点"
         case .speakerEmbedding: return "标注说话人、重新分析说话人"
         case .speakerSegmentation: return "录音结束后的整场多人分析"
+        case .polishModel: return "把转写整理成书面记录（去口头禅、修同音错字），本机运行"
         }
     }
 
@@ -71,6 +74,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
         case .punctuation: return "约 62 MB"
         case .speakerEmbedding: return "约 28 MB"
         case .speakerSegmentation: return "约 7 MB"
+        case .polishModel: return "约 2.5 GB"
         }
     }
 
@@ -102,7 +106,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
             return URL(string: base + "speaker-recongition-models/" + Self.speakerEmbeddingFile)
         case .speakerSegmentation:
             return URL(string: base + "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2")
-        case .senseVoiceANE, .qwen3ASRLarge:
+        case .senseVoiceANE, .qwen3ASRLarge, .polishModel:
             return nil
         }
     }
@@ -118,11 +122,17 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
                     URL(string: "\($0)/mradermacher/Qwen3-ASR-1.7B-GGUF/resolve/main/\(name)")
                 }
             }
+        case .polishModel:
+            // https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF (Qwen3: Apache-2.0)
+            return [["https://hf-mirror.com", "https://huggingface.co"].compactMap {
+                URL(string: "\($0)/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/\(Self.polishModelFile)")
+            }]
         default:
             return nil
         }
     }
 
+    static let polishModelFile = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
     static let qwen3LargeModelFile = "Qwen3-ASR-1.7B.Q8_0.gguf"
     static let qwen3LargeProjectorFile = "Qwen3-ASR-1.7B.mmproj-f16.gguf"
 
@@ -138,6 +148,7 @@ public enum ModelKind: String, CaseIterable, Identifiable, Sendable {
         case .qwen3ASR: return "qwen3-asr-0.6b"
         case .funASRNano: return "funasr-nano"
         case .qwen3ASRLarge: return "qwen3-asr-1.7b-gguf"
+        case .polishModel: return "polish-qwen3-4b"
         case .punctuation: return "punctuation-zh-en"
         case .speakerEmbedding: return "speaker-embedding"
         case .speakerSegmentation: return "speaker-segmentation"
@@ -207,6 +218,8 @@ public struct ModelLocator: Sendable {
             return (try? streamingFiles(in: directory(for: kind))) != nil
         case .qwen3ASRLarge:
             return (try? ggufFiles(in: directory(for: kind))) != nil
+        case .polishModel:
+            return (try? polishModelFile()) != nil
         case .senseVoice, .paraformer, .fireRed, .qwen3ASR, .funASRNano:
             return (try? offlineFiles(kind, in: directory(for: kind))) != nil
         case .speakerEmbedding, .speakerSegmentation, .punctuation:
@@ -215,6 +228,16 @@ public struct ModelLocator: Sendable {
     }
 
     // MARK: - File resolution (also used to validate staged / imported folders)
+
+    /// The chat model for 润色 (one GGUF file).
+    public func polishModelFile(in dir: URL? = nil) throws -> String {
+        let dir = dir ?? directory(for: .polishModel)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard let name = files.filter({ $0.hasSuffix(".gguf") }).sorted().first,
+              ((try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(name).path)[.size] as? Int) ?? 0) > 100_000_000
+        else { throw ASRError.modelMissing(ModelKind.polishModel.title) }
+        return dir.appendingPathComponent(name).path
+    }
 
     /// A llama.cpp model and its audio projector ("*mmproj*.gguf").
     public func ggufFiles(in dir: URL? = nil) throws -> (model: String, projector: String) {

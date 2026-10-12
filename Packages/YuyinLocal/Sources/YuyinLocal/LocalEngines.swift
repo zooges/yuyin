@@ -200,6 +200,15 @@ public struct LocalEngines: Sendable {
         SherpaVoiceDetector.bundledModel.map { SherpaVoiceDetector(model: $0) }
     }
 
+    /// The local model for 润色, when downloaded (macOS).
+    public func makePolisher() throws -> any TextGenerating {
+        #if canImport(llama)
+        return LlamaChatModel(model: try locator.polishModelFile())
+        #else
+        throw ASRError.unavailable("润色仅支持 Mac")
+        #endif
+    }
+
     public var canLabelSpeakers: Bool {
         locator.isInstalled(.speakerEmbedding)
     }

@@ -283,3 +283,66 @@ final class RepetitionLoopTests: XCTestCase {
     }
 }
 
+final class PolishTests: XCTestCase {
+    func testAnswersMustLineUpWithTheParagraphs() {
+        XCTAssertEqual(TranscriptPolish.parse("【1】作业指导书是长城汽车给我们的。\n\n【2】徐律师：对。", count: 2),
+                       ["作业指导书是长城汽车给我们的。", "对。"])
+        XCTAssertEqual(TranscriptPolish.parse("好的：\n【1】甲，乙。【2】丙。", count: 2), ["甲，乙。", "丙。"])
+        XCTAssertNil(TranscriptPolish.parse("【1】甲乙丙", count: 2), "a paragraph left out")
+        XCTAssertNil(TranscriptPolish.parse("【2】乙\n【1】甲", count: 2), "out of order")
+    }
+
+    /// Seen with Qwen3-4B on the user's meeting: a light cleanup passes, a summary does not.
+    func testRewritesThatSummarizeOrInventAreRejected() {
+        let original = "但是呢他们在自己生产的过程中，包括提到了很多业内的专。加什么西门子啊，什么这种业内顶级的专家发现这个零部件不可能做到圆柱状。"
+        XCTAssertTrue(TranscriptPolish.isFaithful("但是他们在自己生产的过程中，请教了很多业内的专家，比如西门子等业内顶级的专家，发现这个零部件不可能做到圆柱状。", to: original))
+        XCTAssertFalse(TranscriptPolish.isFaithful("所以我们为了影响法官的判断，提前准备了上述证据链。", to: original))
+        XCTAssertFalse(TranscriptPolish.isFaithful("专家认为无法加工。", to: original), "most of what was said is gone")
+    }
+
+    func testRuleCleanupRemovesOnlyFillers() {
+        XCTAssertEqual(TextFilter.removingFillers("我就是一个代理人，嗯，那代理人会有必要的义务。呃。这个这个这个这个。"),
+                       "我就是一个代理人，那代理人会有必要的义务。这个。")
+        XCTAssertEqual(TextFilter.removingFillers("我我我到底做错了啥"), "我到底做错了啥")
+        XCTAssertEqual(TextFilter.removingFillers("常常看看，一个一个来"), "常常看看，一个一个来")
+    }
+
+    func testTurnsGroupOneSpeakersSentences() {
+        let us = [Utterance(startMs: 0, finalText: "但是呢他们包括提到了很多业内的专。", status: .final, provider: "x", speakerIndex: 0),
+                  Utterance(startMs: 1, finalText: "加什么西门子啊。", status: .final, provider: "x", speakerIndex: 0),
+                  Utterance(startMs: 2, finalText: "。", status: .final, provider: "x"),
+                  Utterance(startMs: 3, finalText: "对。", status: .final, provider: "x", speakerIndex: 1)]
+        let paragraphs = TranscriptPolish.paragraphs(us, book: SpeakerBook())
+        XCTAssertEqual(paragraphs.map(\.ids.count), [2, 1])
+        XCTAssertEqual(paragraphs[0].text, "但是呢他们包括提到了很多业内的专。加什么西门子啊。")
+        XCTAssertEqual(paragraphs[1].speaker, "说话人 2")
+    }
+
+    /// Answers like an LLM would: once out of line, then each paragraph without its fillers.
+    final class FakeModel: TextGenerating, @unchecked Sendable {
+        var calls = 0
+        func prepare() async throws {}
+        func complete(system: String, user: String, maxTokens: Int) async throws -> String {
+            calls += 1
+            if calls == 1 { return "乱了" }
+            return user.components(separatedBy: "\n\n").filter { $0.hasPrefix("【") }.map { block in
+                let label = block[..<block.index(after: block.firstIndex(of: "】")!)]
+                let text = block[block.index(after: block.firstIndex(of: "：")!)...]
+                return label + text.replacingOccurrences(of: "呃，", with: "")
+            }.joined(separator: "\n")
+        }
+        func shutdown() async {}
+    }
+
+    func testRunRetriesAMisalignedAnswerAndPutsTheTurnOnItsFirstSentence() async throws {
+        let a = Utterance(startMs: 0, finalText: "呃，这个合同是这个", status: .final, provider: "x", speakerIndex: 0)
+        let b = Utterance(startMs: 1, finalText: "内容。", status: .final, provider: "x", speakerIndex: 0)
+        let c = Utterance(startMs: 2, finalText: "第八个是什么？", status: .final, provider: "x", speakerIndex: 1)
+        let model = FakeModel()
+        let result = try await TranscriptPolish.run([a, b, c], book: SpeakerBook(), model: model, background: nil, terms: []) { _ in }
+        XCTAssertEqual(model.calls, 2)
+        XCTAssertEqual(result[a.id], "这个合同是这个内容。")
+        XCTAssertEqual(result[b.id], "")
+        XCTAssertEqual(result[c.id], "第八个是什么？")
+    }
+}

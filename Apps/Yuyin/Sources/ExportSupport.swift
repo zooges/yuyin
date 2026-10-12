@@ -24,16 +24,32 @@ extension Meeting {
         let name = title.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         return "\(name).\(format.fileExtension)"
     }
+
+    /// The export as a temporary file named after the recording, for handing to other apps
+    /// (WeChat, B&Y AGENT, … take files, not text).
+    func exportFile(_ format: ExportFormat, utterances subset: [Utterance]?, includeTranslation: Bool) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Share", isDirectory: true)
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(exportFileName(format))
+        try export(format, utterances: subset, includeTranslation: includeTranslation)
+            .write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 }
 
-/// Export a recording to txt / SRT / Markdown (speaker names, optional translations), or copy it.
+/// Export a recording to txt / SRT / Markdown (speaker names, optional translations), send it to
+/// another app, or copy it.
 struct ExportMenu: View {
     let meeting: Meeting
     var subset: [Utterance]?
     var style: HUDButtonStyle.Kind = .secondary
 
     @State private var includeTranslation = true
-    #if os(iOS)
+    #if os(macOS)
+    @State private var anchor = ShareAnchor()
+    #else
     @State private var document = TranscriptDocument(text: "")
     @State private var format: ExportFormat = .plainText
     @State private var exporting = false
@@ -45,6 +61,11 @@ struct ExportMenu: View {
         Menu {
             ForEach(ExportFormat.allCases) { item in
                 Button("导出 \(item.title)…") { export(item) }
+            }
+            Menu("发送到其他应用") {
+                ForEach(ExportFormat.allCases) { item in
+                    Button(item.title) { share(item) }
+                }
             }
             if hasTranslation {
                 Divider()
@@ -62,9 +83,20 @@ struct ExportMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(meeting.utterances.isEmpty)
-        #if os(iOS)
+        #if os(macOS)
+        .background(ShareAnchorView(anchor: anchor))
+        #else
         .fileExporter(isPresented: $exporting, document: document, contentType: format.contentType,
                       defaultFilename: meeting.exportFileName(format)) { _ in }
+        #endif
+    }
+
+    private func share(_ item: ExportFormat) {
+        guard let url = try? meeting.exportFile(item, utterances: subset, includeTranslation: includeTranslation) else { return }
+        #if os(macOS)
+        Sharing.share(url, from: anchor.view)
+        #else
+        Sharing.share(url)
         #endif
     }
 
@@ -110,7 +142,55 @@ enum FileSaver {
         }
     }
 }
+
+/// The system share popover: Mail, AirDrop, and every app with a share extension (WeChat, …).
+@MainActor
+enum Sharing {
+    static func share(_ url: URL, from view: NSView?) {
+        guard let view else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        NSSharingServicePicker(items: [url]).show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+    }
+}
+
+/// The view a share popover points at: a menu item's action has no view of its own.
+final class ShareAnchor {
+    weak var view: NSView?
+}
+
+struct ShareAnchorView: NSViewRepresentable {
+    let anchor: ShareAnchor
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        anchor.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        anchor.view = view
+    }
+}
 #else
+/// The system share sheet: WeChat, Files, AirDrop, and every app with a share extension.
+@MainActor
+enum Sharing {
+    static func share(_ url: URL) {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        guard var top = scene?.keyWindow?.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        // iPad shows it as a popover, which needs a source.
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = top.view
+            popover.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        top.present(controller, animated: true)
+    }
+}
+
 struct TranscriptDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.plainText] }
     static var writableContentTypes: [UTType] { ExportFormat.allCases.map(\.contentType) }

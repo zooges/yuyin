@@ -86,11 +86,11 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
                 recognizer.decode()
             }
             let result = recognizer.getResult()
-            let marks = zip(result.tokens, result.timestamps)
-                .filter { token, _ in token.contains(where: Self.clauseMarks.contains) }
-                .map { Double($0.1) }
+            let pairs = zip(result.tokens, result.timestamps)
+            let marks = pairs.filter { token, _ in token.contains(where: Self.clauseMarks.contains) }.map { Double($0.1) }
+            let ends = pairs.filter { token, _ in token.contains(where: Self.sentenceMarks.contains) }.map { Double($0.1) }
             return StreamingUpdate(text: result.text, isEndpoint: recognizer.isEndpoint(), clauseEnds: marks,
-                                   heardUntil: result.timestamps.last.map(Double.init))
+                                   sentenceEnds: ends, heardUntil: result.timestamps.last.map(Double.init))
         }
     }
 
@@ -104,6 +104,7 @@ public final class SherpaStreamingEngine: StreamingASREngine, @unchecked Sendabl
     }
 
     static let clauseMarks: Set<Character> = ["，", "。", "？", "！", "；", ",", ".", "?", "!", ";"]
+    static let sentenceMarks: Set<Character> = ["。", "？", "！", "?", "!"]
 
     public func finishUtterance(keepingUntil seconds: Double) async -> String {
         await SherpaRuntime.run(on: queue) { [self] in

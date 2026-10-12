@@ -37,6 +37,9 @@ final class Recorder {
     /// Serializes start / pause / resume / stop (buttons can be tapped faster than events arrive).
     private var transitioning = false
 
+    /// Audio handed to the session at a time (100 ms).
+    nonisolated static let ingestSamples = AudioSpec.samples(forMilliseconds: 100)
+
     init(library: MeetingLibrary) {
         self.library = library
     }
@@ -277,6 +280,11 @@ final class Recorder {
             #if DEBUG
             var previousChunk: UInt64?
             #endif
+            // System audio arrives in ~11 ms pieces (~90 a second). Each ingest has a cost that
+            // grows with the open sentence, so at that rate recognition fell seconds behind
+            // within every long sentence. Feed it 100 ms at a time, like the microphone.
+            var pending: [Float] = []
+            var pendingSince: UInt64?
             for await chunk in stream {
                 #if DEBUG
                 if let previousChunk {
@@ -285,14 +293,21 @@ final class Recorder {
                 }
                 previousChunk = chunk.captured
                 #endif
-                await session.ingest(chunk.samples)
+                if pendingSince == nil { pendingSince = chunk.captured }
+                pending += chunk.samples
+                guard pending.count >= Self.ingestSamples else { continue }
+                let samples = pending
+                pending.removeAll(keepingCapacity: true)
+                await session.ingest(samples)
                 #if DEBUG
-                latency?.ingested(captured: chunk.captured)
+                latency?.ingested(captured: pendingSince ?? chunk.captured)
                 #endif
+                pendingSince = nil
+                let peak = AudioSpec.peak(samples)
                 let now = Date()
                 if watchSilence && !warned {
                     // Exact digital silence for a while usually means the permission was denied.
-                    if chunk.peak == 0 {
+                    if peak == 0 {
                         let since = silentSince ?? now
                         silentSince = since
                         if now.timeIntervalSince(since) > 8 {
@@ -306,7 +321,6 @@ final class Recorder {
                 if now.timeIntervalSince(lastPublish) > 0.08 {
                     lastPublish = now
                     let elapsed = await session.elapsedMs
-                    let peak = chunk.peak
                     #if DEBUG
                     let scheduled = DispatchTime.now().uptimeNanoseconds
                     #endif
@@ -320,6 +334,8 @@ final class Recorder {
                     }
                 }
             }
+            // The last few milliseconds before the input closed.
+            if !pending.isEmpty { await session.ingest(pending) }
         }
     }
 

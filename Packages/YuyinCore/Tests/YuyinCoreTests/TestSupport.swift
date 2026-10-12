@@ -48,9 +48,12 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
     var textDelayChunks = 0
     /// Writes "，" after every this many characters, reporting when (like X-ASR's punctuation).
     var clauseEveryChars: Int?
+    /// Writes "。" (a sentence end) instead of "，".
+    var clauseMark: Character = "，"
     private var voicedChunks = 0
     private var samplesSinceReset = 0
     private var clauseEnds: [Double] = []
+    private var sentenceEnds: [Double] = []
     /// When each character of `text` was written (seconds since the last reset).
     private var times: [Double] = []
     var prepareError: Error?
@@ -73,9 +76,10 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
                     times.append(now)
                 }
                 if let every = clauseEveryChars, text.filter({ $0 == "字" }).count % every == 0, text.last == "字" {
-                    text += "，"
+                    text.append(clauseMark)
                     times.append(now)
                     clauseEnds.append(now)
+                    if clauseMark == "。" { sentenceEnds.append(now) }
                 }
             }
             var endpoint = silenceEndpoints && text.isEmpty
@@ -83,7 +87,8 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
                 endpoint = true
                 endpointAfterChars = nil
             }
-            return StreamingUpdate(text: text, isEndpoint: endpoint, clauseEnds: clauseEnds, heardUntil: times.last)
+            return StreamingUpdate(text: text, isEndpoint: endpoint, clauseEnds: clauseEnds, sentenceEnds: sentenceEnds,
+                                   heardUntil: times.last)
         }
     }
 
@@ -94,6 +99,7 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
             voicedChunks = 0
             samplesSinceReset = 0
             clauseEnds = []
+            sentenceEnds = []
             times = []
             return out
         }

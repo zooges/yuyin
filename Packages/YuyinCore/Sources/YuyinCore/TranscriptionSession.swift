@@ -41,6 +41,8 @@ public actor TranscriptionSession {
     /// The open sentence's text as the recognizer wrote it; what is shown may start with an
     /// early correction instead (`interim`).
     private var live = ""
+    /// The recognizer's text before cleanup, to notice when nothing new came.
+    private var rawLive = ""
     /// A long sentence still being spoken gets its first part corrected early, every few
     /// seconds, so corrected text never waits for a 15–20 s monologue sentence to end. It is
     /// shown in place of that much live text (`liveCount` characters).
@@ -231,7 +233,7 @@ public actor TranscriptionSession {
         guard phase == .listening else { return }
 
         updatePartial(update.text)
-        if let segment = await speakerChange() {
+        if let segment = await speakerChange() ?? sentenceEndCut(update.sentenceEnds) {
             await closeSentence(segment)
             return
         }
@@ -326,6 +328,9 @@ public actor TranscriptionSession {
     // MARK: - Sentences
 
     private func updatePartial(_ text: String) {
+        // Most chunks add no word; the work below grows with the sentence, so skip it then.
+        guard open == nil || text != rawLive else { return }
+        rawLive = text
         let trimmed = lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(text.trimmingCharacters(in: .whitespacesAndNewlines))))
         guard let engines else { return }
         live = trimmed
@@ -415,6 +420,22 @@ public actor TranscriptionSession {
         return segmenter.cutInSpeech(near: boundary, reason: .speakerChange)
     }
 
+    /// A long sentence without a pause closes at the recognizer's latest full stop.
+    private func sentenceEndCut(_ ends: [Double]) -> Segment? {
+        let config = segmenter.config
+        guard config.sentenceEndCutMs > 0, !ends.isEmpty, segmenter.hasSpeech, let speechStart = segmenter.openSpeechStart,
+              segmenter.openDurationMs >= config.sentenceEndCutMs
+        else { return nil }
+        let earliest = speechStart + AudioSpec.samples(forMilliseconds: config.minSentenceMs)
+        // The mark lags its words a little: one this recent may still have them coming.
+        let latest = segmenter.position - AudioSpec.samples(forMilliseconds: 300)
+        guard let mark = ends.map({ streamStart + Int($0 * Double(AudioSpec.sampleRate)) })
+            .last(where: { $0 >= earliest && $0 <= latest })
+        else { return nil }
+        return segmenter.cutInSpeech(near: mark + AudioSpec.samples(forMilliseconds: config.sentenceCutOffsetMs),
+                                     reason: .sentenceEnd, reachMs: config.sentenceCutReachMs)
+    }
+
     private func closeSentence(_ segment: Segment?) async {
         guard let engines, jobs != nil else { return }
         // A length or speaker cut lies in the past: the recognizer has already heard the start
@@ -447,6 +468,7 @@ public actor TranscriptionSession {
         openEmitted = false
         interim = nil
         live = ""
+        rawLive = ""
         nextInterimAt = 0
 
         let hint = finished.isEmpty ? utterance.partial : lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(finished)))

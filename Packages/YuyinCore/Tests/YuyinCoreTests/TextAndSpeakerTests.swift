@@ -142,6 +142,15 @@ final class TermLexiconTests: XCTestCase {
         XCTAssertEqual(lexicon.correct("就是诉讼旅行的问题"), "就是诉讼履行的问题")
     }
 
+    /// Live text is corrected on every new word; a long sentence must stay cheap.
+    func testCorrectingALongSentenceIsFast() {
+        let lexicon = AppSettings(vocabulary: ["长城汽车", "成都航天", "徐律师"]).termLexicon
+        let text = String(repeating: "我们提供给他的作业指导书，法官的新政，权力瑕疵的设备。", count: 6)
+        let start = Date()
+        for _ in 0..<20 { _ = lexicon.correct(text) }
+        XCTAssertLessThan(Date().timeIntervalSince(start) / 20, 0.01, "per call, \(text.count) characters")
+    }
+
     func testDifferentTonesAndAmbiguousWordsStay() {
         let lexicon = TermLexicon(terms: LegalVocabulary.terms)
         // 语气 yǔqì ≠ 逾期 yúqī; 权力 and 定金 / 订金 are law terms of their own.

@@ -27,6 +27,11 @@ public struct TermLexicon: Sendable {
 
     /// Longest first, so a longer term wins over a shorter one inside it.
     private let terms: [Term]
+    /// Terms by their first syllable (same-sound matches start there), and the names that may
+    /// also match by similar sound: live text is corrected ten times a second, so not every
+    /// term is tried at every character.
+    private let byFirstSyllable: [Syllable: [Int]]
+    private let similarTerms: [Int]
     private let rules: [(from: String, to: String)]
     /// Terms in their order, for recognizers that take hotwords (rule targets, and names with
     /// Latin letters too). Built-in terms are included only when no names are given.
@@ -61,9 +66,14 @@ public struct TermLexicon: Sendable {
             guard syllables.count == chars.count else { continue }
             built.append(Term(text: chars, syllables: syllables, similar: similar))
         }
-        self.terms = built.sorted { $0.text.count > $1.text.count }
+        let sorted = built.sorted { $0.text.count > $1.text.count }
+        self.terms = sorted
         self.rules = rules.sorted { $0.0.count > $1.0.count }
         self.hotwords = hotwords
+        var index: [Syllable: [Int]] = [:]
+        for (offset, term) in sorted.enumerated() { index[term.syllables[0], default: []].append(offset) }
+        byFirstSyllable = index
+        similarTerms = sorted.indices.filter { sorted[$0].similar && sorted[$0].text.count >= Self.fuzzyMinLength }
     }
 
     static let ruleSeparators = ["=", "＝", "→"]
@@ -112,7 +122,10 @@ public struct TermLexicon: Sendable {
     private func bestTerm(at start: Int, chars: [Character], syllables: [Syllable?],
                           _ onWordBoundaries: (Int, Int) -> Bool) -> Term? {
         var fuzzy: (term: Term, score: Double)?
-        for term in terms where start + term.text.count <= chars.count {
+        guard let first = syllables[start] else { return nil }
+        let candidates = similarTerms.isEmpty ? byFirstSyllable[first] ?? []
+            : Array(Set((byFirstSyllable[first] ?? []) + similarTerms)).sorted()
+        for term in candidates.map({ terms[$0] }) where start + term.text.count <= chars.count {
             let window = chars[start..<(start + term.text.count)]
             if window.elementsEqual(term.text) { return term }
             guard let score = Self.likeness(term.syllables, syllables[start..<(start + term.text.count)]) else { continue }

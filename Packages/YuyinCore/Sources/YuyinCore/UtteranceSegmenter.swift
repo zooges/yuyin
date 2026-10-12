@@ -46,6 +46,16 @@ public struct SegmenterConfig: Equatable, Sendable {
     public var veryLongSentenceSilenceMs = 250
     /// A voice model reports speech only after hearing some of it; the sentence starts this much earlier.
     public var voiceOnsetMs = 200
+    /// A sentence this long without a pause closes where the recognizer wrote a full stop
+    /// (0 = never): narration over music (videos played through system audio) has no pauses
+    /// and every sentence ran to the length limit. Commas were tried and cut clauses apart.
+    public var sentenceEndCutMs = 6_000
+    /// Speech a full-stop cut leaves in the first part, at least.
+    public var minSentenceMs = 2_000
+    /// Where to look for the cut, relative to the full stop's time: the recognizer writes the
+    /// mark as the next word begins, and cutting right there split that word off.
+    public var sentenceCutOffsetMs = -250
+    public var sentenceCutReachMs = 150
 
     public init() {}
 
@@ -62,6 +72,8 @@ public struct Segment: Equatable, Sendable {
         case maxLength
         /// Another voice took over without a pause (cut in the past, speech continues).
         case speakerChange
+        /// A long sentence cut at the recognizer's full stop (in the past, speech continues).
+        case sentenceEnd
         case forced
     }
 
@@ -79,7 +91,7 @@ extension Segment.Reason {
     /// Cut while someone is speaking, at a point in the past: the recognizer already heard
     /// the start of the next sentence.
     public var isInSpeech: Bool {
-        self == .maxLength || self == .speakerChange
+        self == .maxLength || self == .speakerChange || self == .sentenceEnd
     }
 }
 

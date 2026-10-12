@@ -436,6 +436,9 @@ extension EvaluationTests {
         if let ms = env["YUYIN_EVAL_BACKSTOP"].flatMap(Int.init) { segmentation.endpointBackstopMs = ms }
         if let ms = env["YUYIN_EVAL_SHORT"].flatMap(Int.init) { segmentation.shortSentenceMs = ms }
         if let ms = env["YUYIN_EVAL_SHORT_SILENCE"].flatMap(Int.init) { segmentation.shortSentenceSilenceMs = ms }
+        if let ms = env["YUYIN_EVAL_SENTENCE_CUT"].flatMap(Int.init) { segmentation.sentenceEndCutMs = ms }
+        if let ms = env["YUYIN_EVAL_SENTENCE_OFFSET"].flatMap(Int.init) { segmentation.sentenceCutOffsetMs = ms }
+        if let ms = env["YUYIN_EVAL_SENTENCE_REACH"].flatMap(Int.init) { segmentation.sentenceCutReachMs = ms }
         var labeler: SherpaSpeakerLabeler?
         if env["YUYIN_EVAL_LABEL"] == "1" {
             var clusterer = OnlineSpeakerClusterer()

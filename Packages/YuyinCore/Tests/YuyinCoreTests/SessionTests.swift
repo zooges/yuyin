@@ -340,4 +340,25 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result.first?.status, .final)
     }
+
+    /// Narration without pauses (videos through system audio): past 6 s the sentence closes at
+    /// the recognizer's full stop, a little before it (the mark comes as the next word starts).
+    func testLongSentenceWithoutAPauseClosesAtAFullStop() async throws {
+        let streaming = ScriptedStreaming()
+        streaming.clauseEveryChars = 30
+        streaming.clauseMark = "。"
+        let session = TranscriptionSession(
+            provider: StaticProvider(set: EngineSet(streaming: streaming, corrector: ScriptedCorrector(),
+                                                    voiceDetector: LevelVoiceDetector())),
+            settings: AppSettings(), earlyCorrections: false
+        )
+        try await session.start()
+        await session.feed(Signal.silence(ms: 500) + Signal.speech(ms: 12_000) + Signal.silence(ms: 1_500), chunk: 1600)
+        let result = await session.stop()
+        XCTAssertGreaterThanOrEqual(result.count, 2)
+        // Full stops at 3.5, 6.5, 9.5 s; once past 6 s, the cut goes ~0.25 s before the 3.5 s one.
+        XCTAssertEqual(Double(result[0].endMs ?? 0), 3_250, accuracy: 300)
+        XCTAssertTrue(result.allSatisfy { ($0.endMs ?? 0) - $0.startMs < 10_000 })
+    }
 }
+

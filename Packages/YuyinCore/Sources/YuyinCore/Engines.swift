@@ -11,13 +11,17 @@ public struct StreamingUpdate: Equatable, Sendable {
     /// for engines that punctuate as they go (X-ASR): where a length cut does least harm.
     /// (Cutting fluent speech at every comma did harm: the corrector loses context.)
     public var clauseEnds: [Double]
+    /// The subset of `clauseEnds` that end a sentence ("。" "？" "！").
+    public var sentenceEnds: [Double]
     /// Seconds into the open sentence of the latest word in `text`, when the engine knows.
     public var heardUntil: Double?
 
-    public init(text: String, isEndpoint: Bool = false, clauseEnds: [Double] = [], heardUntil: Double? = nil) {
+    public init(text: String, isEndpoint: Bool = false, clauseEnds: [Double] = [], sentenceEnds: [Double] = [],
+                heardUntil: Double? = nil) {
         self.text = text
         self.isEndpoint = isEndpoint
         self.clauseEnds = clauseEnds
+        self.sentenceEnds = sentenceEnds
         self.heardUntil = heardUntil
     }
 }

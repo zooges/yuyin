@@ -7,10 +7,18 @@ public struct StreamingUpdate: Equatable, Sendable {
     public var text: String
     /// The engine itself detected a sentence end.
     public var isEndpoint: Bool
+    /// Seconds into the open sentence where the engine wrote a clause-ending mark ("，" "。"),
+    /// for engines that punctuate as they go (X-ASR): where a length cut does least harm.
+    /// (Cutting fluent speech at every comma did harm: the corrector loses context.)
+    public var clauseEnds: [Double]
+    /// Seconds into the open sentence of the latest word in `text`, when the engine knows.
+    public var heardUntil: Double?
 
-    public init(text: String, isEndpoint: Bool = false) {
+    public init(text: String, isEndpoint: Bool = false, clauseEnds: [Double] = [], heardUntil: Double? = nil) {
         self.text = text
         self.isEndpoint = isEndpoint
+        self.clauseEnds = clauseEnds
+        self.heardUntil = heardUntil
     }
 }
 
@@ -41,7 +49,16 @@ public protocol CorrectorASREngine: AnyObject, Sendable {
     func prepare() async throws
     /// `hint` is the streaming text; implementations may return it when they hear nothing.
     func correct(_ samples: [Float], hint: String) async throws -> String
+    /// Like `correct`, for the first part of a sentence still being spoken (shown early, then
+    /// replaced): engines that remember what they transcribed must not remember this.
+    func preview(_ samples: [Float], hint: String) async throws -> String
     func shutdown() async
+}
+
+public extension CorrectorASREngine {
+    func preview(_ samples: [Float], hint: String) async throws -> String {
+        try await correct(samples, hint: hint)
+    }
 }
 
 /// Translates finished sentences.

@@ -223,3 +223,21 @@ final class VocabularyTests: XCTestCase {
         XCTAssertEqual(settings.hotwords.split(separator: ",").count, 20)
     }
 }
+
+final class EarlyCorrectionJoinTests: XCTestCase {
+    /// Seen while replaying the user's monologue.
+    func testRepeatedWordsAndTheFullStopAtTheJoinGo() {
+        XCTAssertEqual(TextFilter.joinCorrected("但是呢，他们在自己。", live: "在自己生产的过程中"),
+                       "但是呢，他们在自己生产的过程中")
+        XCTAssertEqual(TextFilter.joinCorrected("什么西门子啊，什么这种业内。", live: "么这种业内顶级的专家"),
+                       "什么西门子啊，什么这种业内顶级的专家")
+        XCTAssertEqual(TextFilter.joinCorrected("是为了是证明什么呢？", live: "呢？我们给你"), "是为了是证明什么呢？我们给你")
+    }
+
+    func testWithoutOverlapTheLiveTextFollows() {
+        XCTAssertEqual(TextFilter.joinCorrected("合同是这个内容", live: "第八个是什么"), "合同是这个内容第八个是什么")
+        XCTAssertEqual(TextFilter.joinCorrected("合同是这个内容，", live: "第八个"), "合同是这个内容，第八个")
+        XCTAssertEqual(TextFilter.joinCorrected("就是这样。", live: ""), "就是这样")
+    }
+}
+

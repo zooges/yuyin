@@ -76,6 +76,14 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
     }
 
     public func correct(_ samples: [Float], hint: String) async throws -> String {
+        try await transcribe(samples, hint: hint, remember: true)
+    }
+
+    public func preview(_ samples: [Float], hint: String) async throws -> String {
+        try await transcribe(samples, hint: hint, remember: false)
+    }
+
+    private func transcribe(_ samples: [Float], hint: String, remember: Bool) async throws -> String {
         guard !samples.isEmpty else { return hint }
         return try await SherpaRuntime.run(on: queue) { [self] in
             guard let model, let context, let media, let sampler else { throw ASRError.notPrepared }
@@ -111,7 +119,7 @@ public final class LlamaASRCorrector: CorrectorASREngine, @unchecked Sendable {
                 guard decoded == 0 else { break }
             }
             let text = Self.transcript(String(decoding: bytes, as: UTF8.self))
-            if !text.isEmpty { recent = String((recent + text).suffix(Self.recentLength)) }
+            if remember, !text.isEmpty { recent = String((recent + text).suffix(Self.recentLength)) }
             return text.isEmpty ? hint : text
         }
     }

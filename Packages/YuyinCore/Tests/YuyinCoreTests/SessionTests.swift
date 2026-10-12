@@ -285,4 +285,59 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(Double(result.first?.startMs ?? 0), 500, accuracy: 60)
         XCTAssertEqual(Double(result.first?.endMs ?? 0), 2_000, accuracy: 60)
     }
+
+    /// Fluent speech without a pause reaching the length limit: the cut goes at the recognizer's
+    /// latest comma, not at any quiet frame of the last seconds.
+    func testLengthCutGoesNearTheLatestClauseMark() async throws {
+        let streaming = ScriptedStreaming()
+        streaming.clauseEveryChars = 30 // a comma every 3 s of speech (1600-sample chunks)
+        var settings = AppSettings()
+        settings.maxUtteranceSeconds = 10
+        let session = TranscriptionSession(
+            provider: StaticProvider(set: EngineSet(streaming: streaming, corrector: ScriptedCorrector(),
+                                                    voiceDetector: LevelVoiceDetector())),
+            settings: settings, earlyCorrections: false
+        )
+        try await session.start()
+        await session.feed(Signal.silence(ms: 500) + Signal.speech(ms: 14_000) + Signal.silence(ms: 1_500), chunk: 1600)
+        let result = await session.stop()
+        XCTAssertEqual(result.count, 2)
+        // Commas at 3.5, 6.5 and 9.5 s; the 10 s limit cuts near the last one.
+        XCTAssertEqual(Double(result[0].endMs ?? 0), 9_500, accuracy: 250)
+        XCTAssertEqual(Double(result[1].startMs), 9_500, accuracy: 250)
+        // Its live text stops at the comma (one character of slack for recognizer lag).
+        let afterComma = result[0].partial.split(separator: "，", omittingEmptySubsequences: false).last ?? ""
+        XCTAssertEqual(result[0].partial.filter { $0 == "，" }.count, 3, result[0].partial)
+        XCTAssertLessThanOrEqual(afterComma.count, 1, result[0].partial)
+        XCTAssertFalse(result[1].partial.isEmpty)
+    }
+
+    /// A long sentence still being spoken shows corrected text early: the corrector's version
+    /// of what was said so far, followed by the live text heard since.
+    func testLongSentenceShowsAnEarlyCorrectionBeforeItEnds() async throws {
+        let corrector = ScriptedCorrector()
+        let session = TranscriptionSession(
+            provider: StaticProvider(set: EngineSet(streaming: ScriptedStreaming(), corrector: corrector,
+                                                    voiceDetector: LevelVoiceDetector())),
+            settings: AppSettings()
+        )
+        let (log, collecting) = EventLog.collect(session)
+        try await session.start()
+        await session.feed(Signal.silence(ms: 500) + Signal.speech(ms: 9_000), chunk: 1600)
+        // The early correction runs beside the audio; give it a moment.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        await session.feed(Signal.speech(ms: 1_000), chunk: 1600)
+        let early = await log.events.compactMap { event -> Utterance? in
+            if case .upsert(let u) = event, u.status == .partial, u.partial.hasPrefix("纠") { return u }
+            return nil
+        }
+        XCTAssertFalse(early.isEmpty, "an early correction was shown while the sentence was open")
+        // It is followed by the live text heard after it.
+        XCTAssertTrue(early.last.map { $0.partial.hasSuffix("字") } ?? false, early.last?.partial ?? "")
+        await session.feed(Signal.silence(ms: 1_500), chunk: 1600)
+        let result = await session.stop()
+        collecting.cancel()
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.status, .final)
+    }
 }

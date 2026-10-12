@@ -38,6 +38,21 @@ public actor TranscriptionSession {
     private var waiting: [Float] = []
     private static let maxWaitingSamples = AudioSpec.samples(forMilliseconds: 60_000)
 
+    /// The open sentence's text as the recognizer wrote it; what is shown may start with an
+    /// early correction instead (`interim`).
+    private var live = ""
+    /// A long sentence still being spoken gets its first part corrected early, every few
+    /// seconds, so corrected text never waits for a 15–20 s monologue sentence to end. It is
+    /// shown in place of that much live text (`liveCount` characters).
+    private var interim: (text: String, liveCount: Int)?
+    private var interimRunning = false
+    private let earlyCorrections: Bool
+    private var nextInterimAt = 0
+    /// Corrections queued or running; early ones wait for these.
+    private var pendingCorrections = 0
+    static let interimAfterMs = 6_000
+    static let interimEveryMs = 4_000
+
     /// Clips shorter than this are not sent to the speaker labeler.
     private let minLabelSamples = AudioSpec.samples(forMilliseconds: 600)
 
@@ -67,12 +82,14 @@ public actor TranscriptionSession {
     public init(
         provider: any EngineProvider, settings: AppSettings, audioSink: (any SessionAudioSink)? = nil,
         segmentation: SegmenterConfig = SegmenterConfig(),
-        speakerChanges: SpeakerChangeDetector? = SpeakerChangeDetector()
+        speakerChanges: SpeakerChangeDetector? = SpeakerChangeDetector(),
+        earlyCorrections: Bool = true
     ) {
         self.provider = provider
         self.settings = settings
         self.audioSink = audioSink
         changeDetector = speakerChanges
+        self.earlyCorrections = earlyCorrections
         lexicon = settings.termLexicon
         var config = segmentation
         config.silenceMs = settings.silenceMs
@@ -193,15 +210,16 @@ public actor TranscriptionSession {
         guard phase == .listening, let engines, !samples.isEmpty else { return }
         audioSink?.append(samples)
         let voice = await engines.voiceDetector?.detect(samples) ?? []
-        let closedByVAD = segmenter.push(samples, voice: voice)
-
+        // The recognizer first, so a length cut in this chunk knows its latest clause marks.
         let update: StreamingUpdate
         do {
             update = try await engines.streaming.accept(samples)
         } catch {
             notice("实时识别出错：\(error.localizedDescription)")
-            update = StreamingUpdate(text: open?.partial ?? "")
+            update = StreamingUpdate(text: live)
         }
+        segmenter.noteClauseEnds(update.clauseEnds.map { streamStart + Int($0 * Double(AudioSpec.sampleRate)) })
+        let closedByVAD = segmenter.push(samples, voice: voice)
         if !closedByVAD.isEmpty {
             // Already cut from the segmenter: queue them even if a pause/stop began meanwhile.
             // The streaming text belongs to the sentence(s) just closed.
@@ -217,6 +235,7 @@ public actor TranscriptionSession {
             await closeSentence(segment)
             return
         }
+        startInterimIfDue(heardUntil: update.heardUntil)
         if open == nil && !segmenter.hasSpeech {
             // Neither the VAD nor the recognizer hears anyone: drop old leading silence,
             // keeping enough to cover the recognizer's latency.
@@ -309,16 +328,18 @@ public actor TranscriptionSession {
     private func updatePartial(_ text: String) {
         let trimmed = lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(text.trimmingCharacters(in: .whitespacesAndNewlines))))
         guard let engines else { return }
+        live = trimmed
+        let shown = display(trimmed)
         if var current = open {
-            guard current.partial != trimmed else { return }
-            current.partial = trimmed
+            guard current.partial != shown else { return }
+            current.partial = shown
             open = current
         } else {
             guard TextFilter.isMeaningful(trimmed) else { return }
             let start = segmenter.openSpeechStart ?? segmenter.position
             open = Utterance(
                 startMs: AudioSpec.milliseconds(forSamples: start),
-                partial: trimmed,
+                partial: shown,
                 provider: engines.streaming.providerID
             )
         }
@@ -326,6 +347,47 @@ public actor TranscriptionSession {
             upsert(current)
             openEmitted = true
         }
+    }
+
+    /// The early correction, then the live text heard since.
+    private func display(_ live: String) -> String {
+        guard let interim, live.count >= interim.liveCount else { return live }
+        return TextFilter.joinCorrected(interim.text, live: String(live.dropFirst(interim.liveCount)))
+    }
+
+    /// Corrects what has been said of a long open sentence, when the corrector is idle.
+    private func startInterimIfDue(heardUntil: Double?) {
+        guard earlyCorrections, let corrector = engines?.corrector, let id = open?.id, !interimRunning, pendingCorrections == 0,
+              let heardUntil, segmenter.hasSpeech, let speechStart = segmenter.openSpeechStart,
+              segmenter.position - speechStart >= AudioSpec.samples(forMilliseconds: Self.interimAfterMs),
+              segmenter.position >= nextInterimAt
+        else { return }
+        // Up to the latest word the live text has (and a little past it, for its sound).
+        let cover = streamStart + Int(heardUntil * Double(AudioSpec.sampleRate)) + AudioSpec.samples(forMilliseconds: 200)
+        let clip = segmenter.samples(from: segmenter.openStart).prefix(max(0, cover - segmenter.openStart))
+        guard clip.count >= AudioSpec.samples(forMilliseconds: 2_000) else { return }
+        interimRunning = true
+        nextInterimAt = segmenter.position + AudioSpec.samples(forMilliseconds: Self.interimEveryMs)
+        let liveCount = live.count
+        let hint = live
+        let input = AudioSpec.normalizedForRecognition(Array(clip))
+        Task { [weak self] in
+            let text = try? await corrector.preview(input, hint: hint)
+            await self?.applyInterim(text, for: id, liveCount: liveCount)
+        }
+    }
+
+    private func applyInterim(_ text: String?, for id: UUID, liveCount: Int) {
+        interimRunning = false
+        guard let text, var current = open, current.id == id else { return }
+        let cleaned = lexicon.correct(TextFilter.tightenChineseSpacing(
+            TextFilter.normalizeCase(TextFilter.normalizePunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        ))
+        guard TextFilter.isMeaningful(cleaned) else { return }
+        interim = (cleaned, liveCount)
+        current.partial = display(live)
+        open = current
+        upsert(current)
     }
 
     /// Checks the open sentence, one window per hop, for another voice taking over without a
@@ -350,7 +412,7 @@ public actor TranscriptionSession {
         guard changeSentence == segmenter.openSpeechStart,
               let boundary = detector.observe(embedding, windowStart: windowStart)
         else { return nil }
-        return segmenter.cutForSpeakerChange(near: boundary)
+        return segmenter.cutInSpeech(near: boundary, reason: .speakerChange)
     }
 
     private func closeSentence(_ segment: Segment?) async {
@@ -358,7 +420,7 @@ public actor TranscriptionSession {
         // A length or speaker cut lies in the past: the recognizer has already heard the start
         // of the next sentence. Keep only the text before the cut (token times lag the audio a
         // little) and feed the rest of the audio again for the next sentence.
-        let pastCut = segment.map { $0.reason == .maxLength || $0.reason == .speakerChange } ?? false
+        let pastCut = segment?.reason.isInSpeech ?? false
         let finished: String
         if pastCut, let segment {
             let seconds = Double(segment.endSample - streamStart) / Double(AudioSpec.sampleRate) + 0.15
@@ -380,8 +442,12 @@ public actor TranscriptionSession {
     private func queue(_ segment: Segment?, finished: String, provider: String) {
         var utterance = open ?? Utterance(startMs: 0, provider: provider)
         let wasEmitted = openEmitted
+        let early = interim
         open = nil
         openEmitted = false
+        interim = nil
+        live = ""
+        nextInterimAt = 0
 
         let hint = finished.isEmpty ? utterance.partial : lexicon.correct(TextFilter.tightenChineseSpacing(TextFilter.normalizeCase(finished)))
         guard let segment,
@@ -394,7 +460,12 @@ public actor TranscriptionSession {
 
         utterance.startMs = AudioSpec.milliseconds(forSamples: segment.speechStartSample)
         utterance.endMs = AudioSpec.milliseconds(forSamples: segment.speechEndSample)
-        utterance.partial = hint
+        // Until the final correction lands, keep showing the early one where it still applies.
+        if let early, hint.count >= early.liveCount {
+            utterance.partial = TextFilter.joinCorrected(early.text, live: String(hint.dropFirst(early.liveCount)))
+        } else {
+            utterance.partial = hint
+        }
         utterance.status = .pendingCorrection
         upsert(utterance)
         // Segments are contiguous, so they can start with seconds of silence, music or the
@@ -403,6 +474,7 @@ public actor TranscriptionSession {
         let pad = AudioSpec.samples(forMilliseconds: 100)
         let from = min(segment.samples.count, max(0, segment.speechStartSample - segment.startSample - pad))
         let to = max(from, min(segment.samples.count, segment.speechEndSample - segment.startSample + pad))
+        pendingCorrections += 1
         jobs?.yield(CorrectionJob(id: utterance.id, samples: segment.samples, hint: hint, speechMs: segment.speechMs, voiced: from..<to))
     }
 
@@ -449,6 +521,7 @@ public actor TranscriptionSession {
     }
 
     private func process(_ job: CorrectionJob) async {
+        defer { pendingCorrections -= 1 }
         guard let engines else { return }
         var text = job.hint
         var providerID = engines.streaming.providerID

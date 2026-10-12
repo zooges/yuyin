@@ -25,13 +25,22 @@ public final class GuardedCorrector: CorrectorASREngine, @unchecked Sendable {
     }
 
     public func correct(_ samples: [Float], hint: String) async throws -> String {
+        try await guarded(samples, hint: hint) { try await primary.correct($0, hint: $1) }
+    }
+
+    public func preview(_ samples: [Float], hint: String) async throws -> String {
+        try await guarded(samples, hint: hint) { try await primary.preview($0, hint: $1) }
+    }
+
+    private func guarded(_ samples: [Float], hint: String,
+                         _ recognize: ([Float], String) async throws -> String) async throws -> String {
         var gateText: String?
         if !TextFilter.isMeaningful(hint), let gate {
             let heard = (try? await gate.correct(samples, hint: "")) ?? ""
             guard TextFilter.isMeaningful(heard) else { return "" }
             gateText = heard
         }
-        let text = try await primary.correct(samples, hint: hint)
+        let text = try await recognize(samples, hint)
         let hintUnits = TextFilter.contentUnits(hint)
         // A result far shorter than what the live pass heard means the model failed on this
         // audio (e.g. English through a Chinese-only model) — don't let it erase content.
@@ -79,9 +88,17 @@ public final class LanguageRoutingCorrector: CorrectorASREngine, @unchecked Send
     }
 
     public func correct(_ samples: [Float], hint: String) async throws -> String {
-        let engine = TextFilter.isMeaningful(hint) && Language.guess(hint) == .en ? english ?? chinese : chinese
+        let engine = route(hint)
         providerID = engine.providerID
         return try await engine.correct(samples, hint: hint)
+    }
+
+    public func preview(_ samples: [Float], hint: String) async throws -> String {
+        try await route(hint).preview(samples, hint: hint)
+    }
+
+    private func route(_ hint: String) -> any CorrectorASREngine {
+        TextFilter.isMeaningful(hint) && Language.guess(hint) == .en ? english ?? chinese : chinese
     }
 
     public func shutdown() async {

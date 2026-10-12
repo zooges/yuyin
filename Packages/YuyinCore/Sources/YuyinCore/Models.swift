@@ -180,6 +180,33 @@ public enum TextFilter {
         return out.replacingOccurrences(of: " ,", with: ",").trimmingCharacters(in: .whitespaces)
     }
 
+    /// An early correction of a sentence still being spoken, then the live text heard after it.
+    /// The correction ends a little later than the live text it replaced, so the live text
+    /// starts by repeating its last words ("…在自己。" + "在自己生产…"), and the corrector closed
+    /// it with a full stop although the sentence goes on.
+    public static func joinCorrected(_ corrected: String, live tail: String) -> String {
+        var head = corrected
+        while let last = head.last, "。.？?！!".contains(last) { head.removeLast() }
+        let headContent = head.filter { $0.isLetter || $0.isNumber }
+        let tailChars = Array(tail)
+        var best = 0
+        var dropUntil = 0
+        // The longest start of the tail (punctuation aside) that the head already ends with.
+        var content: [Character] = []
+        for (index, char) in tailChars.enumerated() {
+            guard char.isLetter || char.isNumber else { continue }
+            content.append(char)
+            if content.count > 8 { break }
+            if headContent.hasSuffix(String(content)) {
+                best = content.count
+                dropUntil = index + 1
+            }
+        }
+        let rest = best > 0 ? String(tailChars[dropUntil...]) : tail
+        // The early correction may end anywhere in a clause: no punctuation of our own.
+        return head + rest.drop { $0 == " " }
+    }
+
     /// Drops spaces next to Chinese characters and punctuation ("首期款， 通过" from X-ASR's
     /// BPE output); spaces between Latin words stay.
     public static func tightenChineseSpacing(_ text: String) -> String {

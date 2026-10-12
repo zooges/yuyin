@@ -1269,3 +1269,77 @@ extension EvaluationTests {
         }
     }
 }
+
+extension EvaluationTests {
+    /// Every token of the installed streaming model with its time, one pass without resets
+    /// (YUYIN_EVAL_OUT=<json>), to see where its punctuation falls against the audio.
+    func testStreamingTokenTimes() throws {
+        let audio = Array(try WAVFile.read(try XCTUnwrap(wav)).prefix(16000 * 300))
+        let locator = ModelLocator.standard
+        let files = try locator.streamingFiles(in: locator.directory(for: .streamingXASR))
+        let modelConfig = sherpaOnnxOnlineModelConfig(
+            tokens: files.tokens,
+            transducer: sherpaOnnxOnlineTransducerModelConfig(encoder: files.encoder, decoder: files.decoder, joiner: files.joiner),
+            numThreads: 4, modelType: ""
+        )
+        var config = sherpaOnnxOnlineRecognizerConfig(
+            featConfig: sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80), modelConfig: modelConfig, enableEndpoint: false
+        )
+        let recognizer = SherpaOnnxRecognizer(config: &config)
+        var emitted: [Double] = []
+        for start in stride(from: 0, to: audio.count, by: 1600) {
+            let end = min(start + 1600, audio.count)
+            recognizer.acceptWaveform(samples: Array(audio[start..<end]), sampleRate: 16000)
+            while recognizer.isReady() { recognizer.decode() }
+            let count = recognizer.getResult().tokens.count
+            while emitted.count < count { emitted.append(Double(end) / 16000) }
+        }
+        let result = recognizer.getResult()
+        let rows = zip(zip(result.tokens, result.timestamps), emitted).map { ["token": $0.0.0, "time": Double($0.0.1), "emitted": $0.1] as [String: Any] }
+        let out = try XCTUnwrap(ProcessInfo.processInfo.environment["YUYIN_EVAL_OUT"])
+        try JSONSerialization.data(withJSONObject: rows).write(to: URL(fileURLWithPath: out))
+    }
+}
+
+extension EvaluationTests {
+    /// What the open sentence shows over time, fed at real-time pace with the production engines
+    /// (YUYIN_EVAL_FROM / YUYIN_EVAL_SECONDS select a stretch): early corrections replace the
+    /// live text while a long sentence is still being spoken.
+    func testOpenSentenceOverTime() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let all = try WAVFile.read(try XCTUnwrap(wav))
+        let from = Int((Double(env["YUYIN_EVAL_FROM"] ?? "0") ?? 0) * 16000)
+        let audio = Array(all[from..<min(all.count, from + Int((Double(env["YUYIN_EVAL_SECONDS"] ?? "40") ?? 40) * 16000))])
+        var local = LocalEngines()
+        local.background = AppSettings().recognitionBackground
+        let session = TranscriptionSession(
+            provider: StaticEngines(set: EngineSet(
+                streaming: try local.makeStreaming(local.resolveStreaming(.auto)),
+                corrector: try local.makeCorrector(local.resolveCorrector(.auto)),
+                voiceDetector: local.makeVoiceDetector()
+            )),
+            settings: AppSettings()
+        )
+        try await session.start()
+        let t0 = Date()
+        let watcher = Task {
+            var last: [UUID: String] = [:]
+            var lines: [String] = []
+            for await event in session.events {
+                guard case .upsert(let u) = event, last[u.id] != u.displayText else { continue }
+                last[u.id] = u.displayText
+                lines.append(String(format: "OPEN %5.1fs [%@] %@", Date().timeIntervalSince(t0), u.status == .final ? "final" : "live ", u.displayText))
+            }
+            return lines
+        }
+        for start in stride(from: 0, to: audio.count, by: 1600) {
+            let end = min(start + 1600, audio.count)
+            let wait = Double(end) / 16000 - Date().timeIntervalSince(t0)
+            if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1e9)) }
+            await session.ingest(Array(audio[start..<end]))
+        }
+        _ = await session.stop()
+        let lines = await watcher.value
+        if let out = env["YUYIN_EVAL_OUT"] { try lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8) }
+    }
+}

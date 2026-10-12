@@ -46,7 +46,13 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
     var silenceEndpoints = false
     /// Chunks of speech before any text is produced (decoder latency).
     var textDelayChunks = 0
+    /// Writes "，" after every this many characters, reporting when (like X-ASR's punctuation).
+    var clauseEveryChars: Int?
     private var voicedChunks = 0
+    private var samplesSinceReset = 0
+    private var clauseEnds: [Double] = []
+    /// When each character of `text` was written (seconds since the last reset).
+    private var times: [Double] = []
     var prepareError: Error?
     var prepareDelayNanos: UInt64 = 0
     private(set) var shutdownCount = 0
@@ -58,16 +64,26 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
 
     func accept(_ samples: [Float]) async throws -> StreamingUpdate {
         lock.withLock {
+            samplesSinceReset += samples.count
             if AudioSpec.peak(samples) > 0.05 {
                 voicedChunks += 1
-                if voicedChunks > textDelayChunks { text += "字" }
+                let now = Double(samplesSinceReset) / Double(AudioSpec.sampleRate)
+                if voicedChunks > textDelayChunks {
+                    text += "字"
+                    times.append(now)
+                }
+                if let every = clauseEveryChars, text.filter({ $0 == "字" }).count % every == 0, text.last == "字" {
+                    text += "，"
+                    times.append(now)
+                    clauseEnds.append(now)
+                }
             }
             var endpoint = silenceEndpoints && text.isEmpty
             if let limit = endpointAfterChars, text.count >= limit {
                 endpoint = true
                 endpointAfterChars = nil
             }
-            return StreamingUpdate(text: text, isEndpoint: endpoint)
+            return StreamingUpdate(text: text, isEndpoint: endpoint, clauseEnds: clauseEnds, heardUntil: times.last)
         }
     }
 
@@ -76,8 +92,17 @@ final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
             let out = text
             text = ""
             voicedChunks = 0
+            samplesSinceReset = 0
+            clauseEnds = []
+            times = []
             return out
         }
+    }
+
+    func finishUtterance(keepingUntil seconds: Double) async -> String {
+        let kept = lock.withLock { String(zip(text, times).prefix { $0.1 < seconds }.map(\.0)) }
+        _ = await finishUtterance()
+        return kept
     }
 
     func shutdown() async {

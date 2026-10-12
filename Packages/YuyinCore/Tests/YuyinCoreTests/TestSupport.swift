@@ -1,0 +1,154 @@
+import Foundation
+@testable import YuyinCore
+
+enum Signal {
+    static func tone(ms: Int, amplitude: Float = 0.2) -> [Float] {
+        let n = AudioSpec.samples(forMilliseconds: ms)
+        return (0..<n).map { i in amplitude * sin(Float(i) * 2 * .pi * 220 / Float(AudioSpec.sampleRate)) }
+    }
+
+    /// Speech-like: a tone whose loudness rises and falls ~4 times a second (syllables),
+    /// never fully silent within the burst.
+    static func speech(ms: Int, amplitude: Float = 0.2) -> [Float] {
+        let n = AudioSpec.samples(forMilliseconds: ms)
+        let rate = Float(AudioSpec.sampleRate)
+        return (0..<n).map { i in
+            let t = Float(i) / rate
+            let envelope = 0.55 + 0.45 * sin(2 * .pi * 4 * t)
+            return amplitude * envelope * sin(2 * .pi * 220 * t)
+        }
+    }
+
+    static func silence(ms: Int, noise: Float = 0.0005) -> [Float] {
+        let n = AudioSpec.samples(forMilliseconds: ms)
+        var seed: UInt32 = 12345
+        return (0..<n).map { _ in
+            seed = seed &* 1_664_525 &+ 1_013_904_223
+            return (Float(seed % 2000) / 1000 - 1) * noise
+        }
+    }
+
+    static func chunks(_ samples: [Float], size: Int) -> [[Float]] {
+        stride(from: 0, to: samples.count, by: size).map {
+            Array(samples[$0..<min($0 + size, samples.count)])
+        }
+    }
+}
+
+/// Emits one character per voiced chunk; mimics a streaming recognizer.
+final class ScriptedStreaming: StreamingASREngine, @unchecked Sendable {
+    let providerID = "test-stream"
+    private let lock = NSLock()
+    private var text = ""
+    /// Fires a single engine endpoint once the open sentence reaches this many characters.
+    var endpointAfterChars: Int?
+    /// Reports an endpoint with empty text on every chunk (like sherpa's silence rule).
+    var silenceEndpoints = false
+    /// Chunks of speech before any text is produced (decoder latency).
+    var textDelayChunks = 0
+    private var voicedChunks = 0
+    var prepareError: Error?
+    private(set) var shutdownCount = 0
+
+    func prepare() async throws {
+        if let prepareError { throw prepareError }
+    }
+
+    func accept(_ samples: [Float]) async throws -> StreamingUpdate {
+        lock.withLock {
+            if AudioSpec.peak(samples) > 0.05 {
+                voicedChunks += 1
+                if voicedChunks > textDelayChunks { text += "字" }
+            }
+            var endpoint = silenceEndpoints && text.isEmpty
+            if let limit = endpointAfterChars, text.count >= limit {
+                endpoint = true
+                endpointAfterChars = nil
+            }
+            return StreamingUpdate(text: text, isEndpoint: endpoint)
+        }
+    }
+
+    func finishUtterance() async -> String {
+        lock.withLock {
+            let out = text
+            text = ""
+            voicedChunks = 0
+            return out
+        }
+    }
+
+    func shutdown() async {
+        lock.withLock { shutdownCount += 1 }
+    }
+}
+
+final class ScriptedCorrector: CorrectorASREngine, @unchecked Sendable {
+    let providerID: String
+    private let lock = NSLock()
+    var delayNanos: UInt64 = 0
+    var error: Error?
+    var output: ((String) -> String)?
+    private(set) var calls = 0
+    private(set) var maxConcurrent = 0
+    private var running = 0
+
+    init(id: String = "test-correct") {
+        providerID = id
+    }
+
+    func prepare() async throws {}
+
+    func correct(_ samples: [Float], hint: String) async throws -> String {
+        lock.withLock {
+            calls += 1
+            running += 1
+            maxConcurrent = max(maxConcurrent, running)
+        }
+        defer { lock.withLock { running -= 1 } }
+        if delayNanos > 0 { try? await Task.sleep(nanoseconds: delayNanos) }
+        if let error { throw error }
+        return output?(hint) ?? "纠\(hint)。"
+    }
+
+    func shutdown() async {}
+}
+
+struct StaticProvider: EngineProvider {
+    let set: EngineSet
+    func makeEngines(for settings: AppSettings) async throws -> EngineSet { set }
+}
+
+actor EventLog {
+    private(set) var events: [TranscriptEvent] = []
+
+    func append(_ e: TranscriptEvent) { events.append(e) }
+
+    var phases: [SessionPhase] {
+        events.compactMap { if case .phase(let p) = $0 { return p } else { return nil } }
+    }
+
+    var notices: [String] {
+        events.compactMap { if case .notice(let n) = $0 { return n } else { return nil } }
+    }
+
+    var removals: Int {
+        events.filter { if case .remove = $0 { return true } else { return false } }.count
+    }
+
+    static func collect(_ session: TranscriptionSession) -> (EventLog, Task<Void, Never>) {
+        let log = EventLog()
+        let task = Task {
+            for await e in session.events { await log.append(e) }
+        }
+        return (log, task)
+    }
+}
+
+extension TranscriptionSession {
+    func feed(_ samples: [Float], chunk: Int = 1024) async {
+        for c in Signal.chunks(samples, size: chunk) {
+            await ingest(c)
+        }
+    }
+}

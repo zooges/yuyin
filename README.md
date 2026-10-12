@@ -70,6 +70,8 @@ xcodebuild -project Yuyin.xcodeproj -scheme Yuyin-iOS -configuration Debug \
 (cd Packages/YuyinLocal && swift test)   # 若本机已装模型，会额外跑真实模型集成测试
 ```
 
+YuyinCore 与 YuyinCloud 只依赖 Foundation，也可以在 Linux（Swift 6 工具链）上运行 `swift test`。
+
 人工验收清单：[`docs/MANUAL_TEST.md`](docs/MANUAL_TEST.md)
 
 ## 仓库结构

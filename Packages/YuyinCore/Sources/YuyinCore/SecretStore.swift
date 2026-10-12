@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(Security)
 import Security
+#else
+public typealias OSStatus = Int32
+#endif
 
 public enum SecretKey: String, Sendable {
     case funASRKey = "funasr.apiKey"
@@ -14,11 +18,16 @@ public protocol SecretStore: AnyObject, Sendable {
 public struct SecretStoreError: Error, LocalizedError {
     public let status: OSStatus
     public var errorDescription: String? {
+        #if canImport(Security)
         let detail = SecCopyErrorMessageString(status, nil) as String? ?? "\(status)"
+        #else
+        let detail = "\(status)"
+        #endif
         return "钥匙串写入失败：\(detail)"
     }
 }
 
+#if canImport(Security)
 public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     private let service: String
 
@@ -68,6 +77,7 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         SecItemDelete(query(key) as CFDictionary)
     }
 }
+#endif
 
 public final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()

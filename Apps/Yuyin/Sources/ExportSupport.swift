@@ -17,6 +17,15 @@ extension ExportFormat {
     }
 }
 
+extension Meeting {
+    /// `title.ext`, without the path separators "/" and ":" that titles often contain
+    /// ("录音 10月11日 14:30", "Q3/Q4 规划") and save panels reject or treat as folders.
+    func exportFileName(_ format: ExportFormat) -> String {
+        let name = title.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        return "\(name).\(format.fileExtension)"
+    }
+}
+
 /// Export a recording to txt / SRT / Markdown (speaker names, optional translations), or copy it.
 struct ExportMenu: View {
     let meeting: Meeting
@@ -55,14 +64,14 @@ struct ExportMenu: View {
         .disabled(meeting.utterances.isEmpty)
         #if os(iOS)
         .fileExporter(isPresented: $exporting, document: document, contentType: format.contentType,
-                      defaultFilename: "\(meeting.title).\(format.fileExtension)") { _ in }
+                      defaultFilename: meeting.exportFileName(format)) { _ in }
         #endif
     }
 
     private func export(_ item: ExportFormat) {
         let text = meeting.export(item, utterances: subset, includeTranslation: includeTranslation)
         #if os(macOS)
-        FileSaver.save(text: text, name: "\(meeting.title).\(item.fileExtension)", type: item.contentType)
+        FileSaver.save(text: text, name: meeting.exportFileName(item), type: item.contentType)
         #else
         format = item
         document = TranscriptDocument(text: text)

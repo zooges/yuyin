@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public enum WebSocketMessage: Sendable, Equatable {
     case text(String)

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import YuyinCore
 
 /// Fun-ASR realtime over WebSocket: run-task → task-started → binary PCM → finish-task.

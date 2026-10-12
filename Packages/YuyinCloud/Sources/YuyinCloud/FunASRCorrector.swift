@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import YuyinCore
 
 /// Sentence-level cloud second pass: one closed sentence → WAV → synchronous Fun-ASR HTTP call.

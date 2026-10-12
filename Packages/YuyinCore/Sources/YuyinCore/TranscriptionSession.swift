@@ -337,7 +337,7 @@ public actor TranscriptionSession {
         do {
             let text = try await translator.translate(job.text, from: direction.source, to: direction.target)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty, var utterance = transcript.first(where: { $0.id == job.id }) else { return }
+            guard !text.isEmpty, var utterance = transcript.last(where: { $0.id == job.id }) else { return }
             utterance.translation = text
             upsert(utterance)
         } catch {
@@ -388,7 +388,7 @@ public actor TranscriptionSession {
             }
         }
 
-        guard var utterance = transcript.first(where: { $0.id == job.id }) else { return }
+        guard var utterance = transcript.last(where: { $0.id == job.id }) else { return }
         guard heard else {
             remove(job.id)
             return
@@ -411,8 +411,9 @@ public actor TranscriptionSession {
 
     // MARK: - Events
 
+    /// Updates hit the newest sentences (partials at ~10 Hz), so search from the end.
     private func upsert(_ utterance: Utterance) {
-        if let index = transcript.firstIndex(where: { $0.id == utterance.id }) {
+        if let index = transcript.lastIndex(where: { $0.id == utterance.id }) {
             transcript[index] = utterance
         } else {
             transcript.append(utterance)

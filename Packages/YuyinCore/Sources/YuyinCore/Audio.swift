@@ -77,7 +77,7 @@ public final class WAVFileWriter: SessionAudioSink, @unchecked Sendable {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        FileManager.default.createFile(atPath: url.path, contents: WAVFile.header(dataBytes: 0))
+        _ = FileManager.default.createFile(atPath: url.path, contents: WAVFile.header(dataBytes: 0))
         handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
     }

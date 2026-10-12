@@ -180,12 +180,16 @@ public struct SpeakerBook: Equatable, Sendable {
     }
 
     /// Speakers present in `utterances`, in order of first appearance.
+    /// One pass without sorting the transcript: views ask for this on every live update.
     public func speakers(in utterances: [Utterance]) -> [Int] {
-        var seen: [Int] = []
-        for u in utterances.sorted(by: { $0.startMs < $1.startMs }) {
-            if let i = resolve(u).speakerIndex, !seen.contains(i) { seen.append(i) }
+        // Speaker → (start, position) of its earliest sentence; ties keep array order.
+        var first: [Int: (startMs: Int, position: Int)] = [:]
+        for (position, u) in utterances.enumerated() {
+            guard let i = resolve(u).speakerIndex else { continue }
+            if let known = first[i], known.startMs <= u.startMs { continue }
+            first[i] = (u.startMs, position)
         }
-        return seen
+        return first.sorted { ($0.value.startMs, $0.value.position) < ($1.value.startMs, $1.value.position) }.map(\.key)
     }
 }
 

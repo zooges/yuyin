@@ -30,6 +30,8 @@ final class Recorder {
     private var pump: Task<Void, Never>?
     private var events: Task<Void, Never>?
     private var autosave: Task<Void, Never>?
+    /// An autosave is waiting to run; later changes ride along with it.
+    private var autosavePending = false
     private var draft: Meeting?
     private var rawUtterances: [Utterance] = []
     /// Serializes start / pause / resume / stop (buttons can be tapped faster than events arrive).
@@ -189,6 +191,8 @@ final class Recorder {
         defer { transitioning = false }
         await stopCapture()
         let transcript = await session.stop()
+        // Exact audio length: the published `elapsedMs` is only refreshed every 80 ms.
+        let durationMs = await session.elapsedMs
         await events?.value
         // An autosave already writing must land before the final save, not after it.
         autosave?.cancel()
@@ -199,7 +203,7 @@ final class Recorder {
         if var meeting = draft {
             meeting.utterances = transcript.map(speakers.resolve)
             meeting.speakerNames = speakers.names
-            meeting.durationMs = elapsedMs
+            meeting.durationMs = durationMs
             meeting.engines = engineInfo.map(EngineNames.summary)
             meeting.isRecording = false
             if transcript.isEmpty {
@@ -317,13 +321,14 @@ final class Recorder {
             engineInfo = info
             draft?.engines = EngineNames.summary(info)
         case .upsert(let utterance):
-            if let index = rawUtterances.firstIndex(where: { $0.id == utterance.id }) {
+            // Updates hit the newest sentences (partials at ~10 Hz), so search from the end.
+            if let index = rawUtterances.lastIndex(where: { $0.id == utterance.id }) {
                 rawUtterances[index] = utterance
             } else {
                 rawUtterances.append(utterance)
             }
             let resolved = speakers.resolve(utterance)
-            if let index = utterances.firstIndex(where: { $0.id == utterance.id }) {
+            if let index = utterances.lastIndex(where: { $0.id == utterance.id }) {
                 utterances[index] = resolved
             } else {
                 utterances.append(resolved)
@@ -344,12 +349,19 @@ final class Recorder {
     }
 
     /// Keeps the on-disk meeting current so a crash loses at most a couple of seconds.
+    /// A throttle, not a debounce: sentences finishing faster than every 2 s must not keep
+    /// postponing the save.
     private func scheduleAutosave() {
-        guard draft != nil else { return }
-        autosave?.cancel()
+        guard draft != nil, !autosavePending else { return }
+        autosavePending = true
+        let previous = autosave
         autosave = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard !Task.isCancelled, let self, var draft = self.draft else { return }
+            // Saves land in order: an older snapshot never overwrites a newer one.
+            await previous?.value
+            guard let self else { return }
+            self.autosavePending = false
+            guard !Task.isCancelled, var draft = self.draft else { return }
             draft.utterances = self.utterances.filter { $0.status == .final || $0.status == .failed }
             draft.speakerNames = self.speakers.names
             draft.durationMs = self.elapsedMs
@@ -361,6 +373,7 @@ final class Recorder {
         session = nil
         events = nil
         autosave = nil
+        autosavePending = false
         draft = nil
         meetingID = nil
         phase = .idle

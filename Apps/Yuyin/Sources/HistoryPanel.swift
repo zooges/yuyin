@@ -22,16 +22,18 @@ private struct MeetingListCard: View {
     @Environment(\.panelMaxHeight) private var maxHeight
     @State private var search = ""
 
-    private var meetings: [Meeting] {
+    private var filteredMeetings: [Meeting] {
         library.meetings.filter { meeting in
             guard meeting.id != recorder.meetingID else { return false }
             guard !search.isEmpty else { return true }
+            // Sentence by sentence: stops at the first hit instead of joining the whole transcript.
             return meeting.title.localizedCaseInsensitiveContains(search)
-                || meeting.plainText.localizedCaseInsensitiveContains(search)
+                || meeting.utterances.contains { $0.displayText.localizedCaseInsensitiveContains(search) }
         }
     }
 
     var body: some View {
+        let meetings = filteredMeetings
         VStack(alignment: .leading, spacing: 12) {
             CardHeader(title: "录音记录", subtitle: library.meetings.isEmpty ? nil : "共 \(library.meetings.count) 条",
                        close: { navigation.panel = nil })
@@ -84,7 +86,7 @@ private struct MeetingRow: View {
                         .monospacedDigit()
                         .foregroundStyle(Theme.tertiaryText)
                 }
-                Text(meeting.plainText.isEmpty ? "（无内容）" : meeting.plainText)
+                Text(preview.isEmpty ? "（无内容）" : preview)
                     .font(Theme.metaFont)
                     .foregroundStyle(Theme.secondaryText)
                     .lineLimit(1)
@@ -100,6 +102,18 @@ private struct MeetingRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+
+    /// The opening sentences: the row shows one line, so don't join a whole transcript for it.
+    private var preview: String {
+        var parts: [String] = []
+        var length = 0
+        for text in meeting.utterances.lazy.map(\.displayText) where TextFilter.isMeaningful(text) {
+            parts.append(text)
+            length += text.count
+            if length >= 200 { break }
+        }
+        return parts.joined(separator: " ")
     }
 }
 
@@ -121,11 +135,11 @@ private struct MeetingDetailCard: View {
 
     private var book: SpeakerBook { meeting.speakerBook }
 
-    private var options: [SpeakerOption] {
+    private func speakerOptions(_ book: SpeakerBook) -> [SpeakerOption] {
         meeting.speakerIndices.map { SpeakerOption(index: $0, label: book.label(for: $0) ?? "") }
     }
 
-    private var lines: [Utterance] {
+    private var filteredLines: [Utterance] {
         meeting.utterances
             .filter { u in
                 if let speakerFilter, u.speakerIndex != speakerFilter { return false }
@@ -137,6 +151,10 @@ private struct MeetingDetailCard: View {
     }
 
     var body: some View {
+        // Computed once per render; every row used to recompute them.
+        let book = self.book
+        let options = speakerOptions(book)
+        let lines = filteredLines
         VStack(alignment: .leading, spacing: 12) {
             CardHeader(title: meeting.title, subtitle: meta, back: { navigation.historyMeeting = nil }, close: { navigation.panel = nil }) {
                 ExportMenu(meeting: meeting, subset: lines, style: .secondary)

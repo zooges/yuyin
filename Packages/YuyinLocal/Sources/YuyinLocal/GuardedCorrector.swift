@@ -62,7 +62,7 @@ public final class GuardedCorrector: CorrectorASREngine, @unchecked Sendable {
 public final class LanguageRoutingCorrector: CorrectorASREngine, @unchecked Sendable {
     public private(set) var providerID: String
     private let chinese: any CorrectorASREngine
-    private let english: any CorrectorASREngine
+    private var english: (any CorrectorASREngine)?
 
     public init(chinese: any CorrectorASREngine, english: any CorrectorASREngine) {
         self.chinese = chinese
@@ -72,17 +72,20 @@ public final class LanguageRoutingCorrector: CorrectorASREngine, @unchecked Send
 
     public func prepare() async throws {
         try await chinese.prepare()
-        try await english.prepare()
+        // The English model is a helper: if it can't load, Chinese still corrects every sentence.
+        if let english {
+            do { try await english.prepare() } catch { self.english = nil }
+        }
     }
 
     public func correct(_ samples: [Float], hint: String) async throws -> String {
-        let engine = TextFilter.isMeaningful(hint) && Language.guess(hint) == .en ? english : chinese
+        let engine = TextFilter.isMeaningful(hint) && Language.guess(hint) == .en ? english ?? chinese : chinese
         providerID = engine.providerID
         return try await engine.correct(samples, hint: hint)
     }
 
     public func shutdown() async {
         await chinese.shutdown()
-        await english.shutdown()
+        await english?.shutdown()
     }
 }

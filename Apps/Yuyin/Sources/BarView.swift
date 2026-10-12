@@ -405,7 +405,7 @@ private struct ExpandedTranscript: View {
         let options = speakerOptions(recorder)
         let labeling = recorder.engineInfo?.speakerLabeling == true
         VStack(alignment: .leading, spacing: 10) {
-            CardHeader(title: "实时记录", subtitle: subtitle) {
+            CardHeader(title: "实时记录", subtitle: subtitle(speakers: options.count)) {
                 IconButton(systemName: "arrow.down.right.and.arrow.up.left", help: "收起", size: 28) {
                     navigation.liveExpanded = false
                 }
@@ -459,9 +459,8 @@ private struct ExpandedTranscript: View {
         }
     }
 
-    private var subtitle: String {
+    private func subtitle(speakers: Int) -> String {
         var parts = ["\(recorder.utterances.count) 句"]
-        let speakers = recorder.speakerIndices.count
         if speakers > 0 { parts.append("\(speakers) 位说话人") }
         return parts.joined(separator: " · ")
     }

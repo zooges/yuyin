@@ -45,6 +45,16 @@ final class SpeakerAndTranslationTests: XCTestCase {
         XCTAssertEqual(book.label(for: 2), "说话人 1", "cleared name falls back to the surviving default label")
     }
 
+    func testSpeakersAreListedByFirstAppearanceInTime() {
+        // Not in time order, with a tie: the earliest start wins, ties keep array order.
+        let tieA = Utterance(startMs: 1_000, provider: "x", speakerIndex: 1)
+        let tieB = Utterance(startMs: 1_000, provider: "x", speakerIndex: 0)
+        let again = Utterance(startMs: 2_000, provider: "x", speakerIndex: 2)
+        let unknown = Utterance(startMs: 0, provider: "x")
+        let early = Utterance(startMs: 500, provider: "x", speakerIndex: 2)
+        XCTAssertEqual(SpeakerBook().speakers(in: [tieA, tieB, again, unknown, early]), [2, 1, 0])
+    }
+
     func testTransferNamesAfterRediarization() {
         let u1 = Utterance(startMs: 0, provider: "x", speakerIndex: 0)
         let u2 = Utterance(startMs: 1, provider: "x", speakerIndex: 0)

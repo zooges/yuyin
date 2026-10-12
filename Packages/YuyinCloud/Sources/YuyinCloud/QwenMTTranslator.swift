@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import YuyinCore
 
 /// Qwen-MT sentence translation over DashScope's OpenAI-compatible endpoint.
